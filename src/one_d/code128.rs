@@ -1,13 +1,12 @@
 //! Code 128: декодер по одной строке + синтезатор (для тестов/демо).
 //!
 //! Поддержка:
-//! - Наборы A/B/C, CODE A/B/C, SHIFT, FNC1 (ASCII 29, GS).
+//! - Наборы A/B/C, коды переключения CODE A/B/C, SHIFT, FNC1 (ASCII 29, GS).
 //! - Проверка checksum (mod 103).
 //! - Детект всех трёх старт-кодов + STOP.
 //!
-//! ВАЖНО: нормализация делается **локально для каждого символа**:
-//! суммарная ширина 6 run'ов приводится к 11 модулям (STOP — 13).
-//! Это устраняет чувствительность к выбору глобального «базового модуля».
+//! Нормализация делается **локально** для каждого символа:
+//! сумма 6 run'ов приводится к 11 модулям (STOP — 7 run'ов к 13 модулям).
 
 use crate::binarize::{binarize_row, binarize_row_adaptive, runs};
 use crate::one_d::DecodeOptions;
@@ -27,7 +26,7 @@ const CODE128_PATTERNS_STR: [&str; 106] = [
     "114131","311141","411131","211412","211214","211232", // 103..105 = Start A/B/C
 ];
 
-/// STOP-паттерн (7 чисел) + финальная чёрная полоса шириной 2 модуля (входит в последовательность).
+/// STOP-паттерн (7 чисел, сумма 13).
 const CODE128_STOP: [u8; 7] = [2,3,3,1,1,1,2];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,50 +36,51 @@ enum CodeSet { A, B, C }
 pub fn decode_row(row_gray: &[u8], opts: &DecodeOptions) -> Option<String> {
     if row_gray.len() < opts.min_modules { return None; }
 
-    // 1) бинаризация (адаптивная -> фоллбэк глобальная) + run-lengths
+    // 1) бинаризация (адаптивная -> фоллбэк) и run-lengths
     let rb1 = binarize_row_adaptive(row_gray);
     let rl1 = runs(&rb1);
-    let (rb, rl) = if rl1.len() >= 24 {
-        (rb1, rl1)
+    let rl = if rl1.len() >= 24 {
+        rl1
     } else {
         let rb2 = binarize_row(row_gray);
         let rl2 = runs(&rb2);
         if rl2.len() < 24 { return None; }
-        (rb2, rl2)
-    };
-    let starts_black = rb.first().copied().unwrap_or(false);
-
-    // цвета run'ов: true=чёрный, false=белый
-    let color_at = |run_idx: usize| -> bool {
-        if starts_black { run_idx % 2 == 0 } else { run_idx % 2 == 1 }
+        rl2
     };
 
     let patterns = get_patterns();
 
-    // 2) поиск старта: скользящее окно по 6 run'ам, локальная нормализация sum=11
-    let mut idx_opt: Option<(usize, CodeSet)> = None;
-    for i in 0..rl.len().saturating_sub(6) {
-        if !color_at(i) { continue; } // символ должен стартовать чёрной полосой
-        let norm = normalize6(&rl[i..i+6]);
-        let mut best = (u32::MAX, 0usize);
-        for &sv in &[103usize, 104usize, 105usize] {
-            let d = patdist6(norm, patterns[sv]);
-            if d < best.0 { best = (d, sv); }
-        }
-        if best.0 <= 2 {
-            let set = match best.1 { 103 => CodeSet::A, 104 => CodeSet::B, 105 => CodeSet::C, _ => CodeSet::B };
-            idx_opt = Some((i+6, set)); // начинаем читать сразу после стартового символа
-            break;
+    // 2) Поиск старта: перебираем все позиции, где 6 run'ов нормализуются в Start A/B/C,
+    //    и слева есть quiet zone (>= ~8 модулей относительно локального масштаба).
+    for i in 1..=rl.len().saturating_sub(6) {
+        // локальная нормализация символа
+        let norm6 = normalize6(&rl[i..i+6]);
+        let (val, dist) = best_code_match(norm6, &patterns);
+        if dist > 1 || val < 103 || val > 105 { continue; }
+
+        // оценим локальный модуль и quiet zone
+        let sum6: usize = rl[i..i+6].iter().sum();
+        let scale = (sum6 as f32) / 11.0;
+        let quiet_left = rl[i-1] as f32;
+        if quiet_left < 8.0 * scale { continue; } // ожидаем ≥ ~8 модулей тишины слева
+
+        let start_set = match val { 103 => CodeSet::A, 104 => CodeSet::B, 105 => CodeSet::C, _ => CodeSet::B };
+        if let Some(text) = try_decode_from(&rl, i + 6, start_set, &patterns) {
+            return Some(text);
         }
     }
-    let (mut idx, mut set) = idx_opt?;
 
-    // 3) читаем символы по 6 run'ов, пока не встретим STOP (7 run'ов)
+    None
+}
+
+/// Попробовать декодировать поток начиная с позиции `idx` после Start-кода.
+/// Возвращает строку при успехе (STOP совпал и checksum корректен).
+fn try_decode_from(rl: &[usize], mut idx: usize, start_set: CodeSet, patterns: &[[u8;6];106]) -> Option<String> {
     let mut values: Vec<u8> = Vec::new(); // все коды до checksum включительно
-    let mut checksum_sum: u32 = match set { CodeSet::A => 103, CodeSet::B => 104, CodeSet::C => 105 };
+    let mut checksum_sum: u32 = match start_set { CodeSet::A => 103, CodeSet::B => 104, CodeSet::C => 105 };
     let mut weight: u32 = 1;
 
-    // вспом: проверить STOP локально (sum=13)
+    // проверка STOP локально (sum=13)
     let is_stop_here = |i: usize| -> bool {
         if i + 7 > rl.len() { return false; }
         let cand = normalize7(&rl[i..i+7]);
@@ -88,38 +88,27 @@ pub fn decode_row(row_gray: &[u8], opts: &DecodeOptions) -> Option<String> {
     };
 
     while idx + 6 <= rl.len() {
-        // сперва проверим STOP (7 элементов)
+        // STOP?
         if is_stop_here(idx) {
             if values.is_empty() { return None; }
             let check = *values.last().unwrap() as u32;
             if checksum_sum % 103 != check { return None; }
-            // декодируем payload (без checksum)
+            // декодируем payload (без checksum) — С ИСХОДНЫМ старт-набором
             let payload = &values[..values.len()-1];
-            let text = decode_values_to_text(payload, set)?;
-            return Some(text);
+            return decode_values_to_text(payload, start_set);
         }
 
-        // обычный 6-элементный символ (локальная нормализация sum=11)
-        let slice6 = normalize6(&rl[idx..idx+6]);
-        let (val, dist) = best_code_match(slice6, &patterns);
-        if dist > 2 || val > 105 {
-            return None;
-        }
+        // обычный символ (локальная нормализация sum=11)
+        let norm6 = normalize6(&rl[idx..idx+6]);
+        let (val, dist) = best_code_match(norm6, patterns);
+        if dist > 1 || val > 105 { return None; }
+
         values.push(val as u8);
         checksum_sum = checksum_sum.wrapping_add((val as u32) * weight);
         weight += 1;
 
-        // переключатели наборов
-        match val {
-            99 => set = CodeSet::C,  // CODE C
-            100 => set = CodeSet::B, // CODE B
-            101 => set = CodeSet::A, // CODE A
-            _ => {}
-        }
-
         idx += 6;
     }
-
     None
 }
 
@@ -135,7 +124,6 @@ fn normalize6(slice: &[usize]) -> [u8;6] {
         let v = ((w as f32) / scale).round() as i32;
         out[k] = v.clamp(1, 4) as u8;
     }
-    // опционально подправим сумму до 11 (редко нужно)
     adjust_sum_to(&mut out, 11);
     out
 }
@@ -158,12 +146,10 @@ fn adjust_sum_to(v: &mut [u8;6], target: i32) {
     let mut sum: i32 = v.iter().map(|&x| x as i32).sum();
     while sum != target {
         if sum > target {
-            // уменьшить самый большой элемент >1
             if let Some((i, _)) = v.iter().enumerate().rev().max_by_key(|(_, &x)| x) {
                 if v[i] > 1 { v[i] -= 1; sum -= 1; } else { break; }
             } else { break; }
         } else {
-            // увеличить самый маленький элемент <4
             if let Some((i, _)) = v.iter().enumerate().min_by_key(|(_, &x)| x) {
                 if v[i] < 4 { v[i] += 1; sum += 1; } else { break; }
             } else { break; }
@@ -186,7 +172,7 @@ fn adjust_sum_to7(v: &mut [u8;7], target: i32) {
     }
 }
 
-// === Декодирование в текст ===
+// === Декодирование код-значений в текст ===
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum NextShift { None, A, B }
@@ -199,7 +185,7 @@ fn decode_values_to_text(vals: &[u8], mut set: CodeSet) -> Option<String> {
     while i < vals.len() {
         let v = vals[i] as u32;
 
-        // применим shift, если активен
+        // SHIFT действует на один следующий символ
         let effective_set = match (set, shift) {
             (CodeSet::A, NextShift::B) => CodeSet::B,
             (CodeSet::B, NextShift::A) => CodeSet::A,
@@ -208,19 +194,19 @@ fn decode_values_to_text(vals: &[u8], mut set: CodeSet) -> Option<String> {
 
         match effective_set {
             CodeSet::A => match v {
-                0..=95 => out.push(v as u8 as char), // ASCII 0..95
-                96 | 97 => {} // FNC3/FNC2 — пропустим
-                98 => { /* SHIFT — обработано через effective_set */ }
+                0..=95 => out.push(v as u8 as char),      // ASCII 0..95
+                96 | 97 => {}                              // FNC3/FNC2 — пропустим
+                98 => { /* SHIFT — применится к следующему */ }
                 99 => set = CodeSet::C,
                 100 => set = CodeSet::B,
                 101 => {/* остаёмся в A */},
-                102 => out.push(29u8 as char), // FNC1 -> ASCII GS
+                102 => out.push(29u8 as char),             // FNC1 -> ASCII GS
                 _ => return None,
             },
             CodeSet::B => match v {
                 0..=95 => out.push((v as u8 + 32) as char), // ASCII 32..127
                 96 | 97 => {},
-                98 => { /* SHIFT — обработано через effective_set */ }
+                98 => { /* SHIFT — применится к следующему */ }
                 99 => set = CodeSet::C,
                 100 => {/* остаёмся в B */},
                 101 => set = CodeSet::A,
@@ -240,11 +226,9 @@ fn decode_values_to_text(vals: &[u8], mut set: CodeSet) -> Option<String> {
             },
         }
 
-        // обновим состояние shift (он действует ровно на один следующий символ)
         if shift != NextShift::None {
             shift = NextShift::None;
         } else if v == 98 {
-            // SHIFT активирует противоположный набор на одну позицию
             shift = match set {
                 CodeSet::A => NextShift::B,
                 CodeSet::B => NextShift::A,

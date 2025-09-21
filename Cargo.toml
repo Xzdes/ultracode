@@ -1,0 +1,17 @@
+[package]
+name = "ultracode"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Zero-deps, high-performance barcode (EAN-13/UPC-A now) and QR engine for grayscale buffers."
+repository = ""
+readme = "README.md"
+categories = ["multimedia::images", "no-std"] # фактически используем std, но без зависимостей
+
+[lib]
+name = "ultracode"
+path = "src/lib.rs"
+
+[features]
+# на будущее: опции для no_std и SIMD (nightly)
+default = []

@@ -1,56 +1,29 @@
 //! Декодер EAN-13/UPC-A по одной строке.
 //!
-//! Алгоритм (упрощённый, но быстрый):
-//! 1) Бинаризуем строку и превращаем в run-lengths.
-//! 2) Нормализуем в модули (1..4).
-//! 3) Ищем стартовый guard (101) и центральный guard (01010), финальный guard (101).
+//! Алгоритм (быстрый и без зависимостей):
+//! 1) Бинаризуем строку (адаптивно, с фоллбэком на глобально) и строим run-lengths.
+//! 2) Нормализуем run'ы в модули (1..4).
+//! 3) Ищем стартовый guard (101), затем центральный (01010) и финальный (101).
 //! 4) Левую половину декодируем с учётом A/B (B = реверс A), правую — C.
 //! 5) Определяем первую цифру по маске A/B, проверяем контрольную сумму.
 
-use crate::binarize::{binarize_row, normalize_modules, runs};
+use crate::binarize::{binarize_row, binarize_row_adaptive, normalize_modules, runs};
 use crate::one_d::DecodeOptions;
 
 // A (L) — левые «A»-паттерны (bars/spaces), сумма = 7 модулей
 const A_PATTERNS: [(u8, u8, u8, u8); 10] = [
-    (3,2,1,1), // 0
-    (2,2,2,1), // 1
-    (2,1,2,2), // 2
-    (1,4,1,1), // 3
-    (1,1,3,2), // 4
-    (1,2,3,1), // 5
-    (1,1,1,4), // 6
-    (1,3,1,2), // 7
-    (1,2,1,3), // 8
-    (3,1,1,2), // 9
+    (3,2,1,1), (2,2,2,1), (2,1,2,2), (1,4,1,1), (1,1,3,2),
+    (1,2,3,1), (1,1,1,4), (1,3,1,2), (1,2,1,3), (3,1,1,2),
 ];
 
 // B (G) — это реверс A (зеркало по run-ам)
 const B_PATTERNS: [(u8, u8, u8, u8); 10] = [
-    (1,1,2,3), // 0: 3211 -> 1123
-    (1,2,2,2), // 1: 2221 -> 1222
-    (2,2,1,2), // 2: 2122 -> 2212
-    (1,1,4,1), // 3: 1411 -> 1141
-    (2,3,1,1), // 4: 1132 -> 2311
-    (1,3,2,1), // 5: 1231 -> 1321
-    (4,1,1,1), // 6: 1114 -> 4111
-    (2,1,3,1), // 7: 1312 -> 2131
-    (3,1,2,1), // 8: 1213 -> 3121
-    (2,1,1,3), // 9: 3112 -> 2113
+    (1,1,2,3), (1,2,2,2), (2,2,1,2), (1,1,4,1), (2,3,1,1),
+    (1,3,2,1), (4,1,1,1), (2,1,3,1), (3,1,2,1), (2,1,1,3),
 ];
 
 // C (R) — правая сторона; по ширинам совпадает с A (инверсия цветов не важна для run-ширин)
-const C_PATTERNS: [(u8, u8, u8, u8); 10] = [
-    (3,2,1,1),
-    (2,2,2,1),
-    (2,1,2,2),
-    (1,4,1,1),
-    (1,1,3,2),
-    (1,2,3,1),
-    (1,1,1,4),
-    (1,3,1,2),
-    (1,2,1,3),
-    (3,1,1,2),
-];
+const C_PATTERNS: [(u8, u8, u8, u8); 10] = A_PATTERNS;
 
 /// Маски для определения первой цифры по типам шести левых цифр (A/B).
 /// true = B, false = A
@@ -71,22 +44,26 @@ const FIRST_DIGIT_MASKS: [(bool, bool, bool, bool, bool, bool); 10] = [
 pub fn decode_row(row_gray: &[u8], opts: &DecodeOptions) -> Option<String> {
     if row_gray.len() < opts.min_modules { return None; }
 
-    // 1) бинаризация
-    let row_bin = binarize_row(row_gray);
+    // --- 1) Бинаризация: пробуем адаптивно, фоллбэк на глобальную
+    let (modules, _starts_black) = {
+        let rb = binarize_row_adaptive(row_gray);
+        let rl = runs(&rb);
+        if rl.len() >= 40 {
+            normalize_modules(&rb, &rl)
+        } else {
+            let rb2 = binarize_row(row_gray);
+            let rl2 = runs(&rb2);
+            if rl2.len() < 40 { return None; }
+            normalize_modules(&rb2, &rl2)
+        }
+    };
 
-    // 2) run-lengths и нормализация
-    let rl = runs(&row_bin);
-    if rl.len() < 40 { // нижняя граница
-        return None;
-    }
-    let (modules, _starts_black) = normalize_modules(&row_bin, &rl);
-
-    // --- Поиск стартового guard: первые подряд [1,1,1] в модулях ---
+    // --- 2) Поиск стартового guard: первые подряд [1,1,1] в модулях ---
     let i = find_guard_start(&modules)?;
     // сдвигаемся за 3 run-а старта
     let mut idx = i + 3;
 
-    // 6 левых цифр: каждая — 4 run'а
+    // --- 3) Левая половина: 6 цифр, каждая — 4 run'а ---
     let mut left_digits = [0u8; 6];
     let mut left_is_b = [false; 6];
     for d in 0..6 {
@@ -104,13 +81,13 @@ pub fn decode_row(row_gray: &[u8], opts: &DecodeOptions) -> Option<String> {
         idx += 4;
     }
 
-    // центральный guard 01010 => 5 run'ов модулей
+    // --- 4) Центральный guard 01010 => 5 run'ов модулей ---
     if !is_guard_center(&modules, idx) {
         return None;
     }
     idx += 5;
 
-    // 6 правых цифр (C-набор), каждая — 4 run'а
+    // --- 5) Правая половина: 6 цифр (C-набор) ---
     let mut right_digits = [0u8; 6];
     for d in 0..6 {
         if idx + 3 >= modules.len() { return None; }
@@ -120,19 +97,19 @@ pub fn decode_row(row_gray: &[u8], opts: &DecodeOptions) -> Option<String> {
         idx += 4;
     }
 
-    // финальный guard 101 (3 run'а)
+    // --- 6) Финальный guard 101 ---
     if !is_guard_end(&modules, idx) {
         return None;
     }
 
-    // восстановим первую цифру по маске типов A/B
+    // --- 7) Первая цифра по маске типов A/B ---
     let first = deduce_first_digit(&left_is_b)?;
     let mut digits = [0u8; 13];
     digits[0] = first;
     for k in 0..6 { digits[1+k] = left_digits[k]; }
     for k in 0..6 { digits[7+k] = right_digits[k]; }
 
-    // проверка контрольной суммы
+    // --- 8) Контрольная сумма ---
     if !check_ean13_checksum(&digits) {
         return None;
     }
@@ -224,10 +201,7 @@ pub fn synthesize_ideal_row(digits: &str, unit: usize) -> Vec<u8> {
         for i in 0..12 { ean13[i+1] = ds[i]; }
         // пересчёт checksum
         let mut sum = 0u32;
-        for i in 0..12 {
-            let w = if i % 2 == 0 { 1 } else { 3 };
-            sum += ean13[i] as u32 * w;
-        }
+        for i in 0..12 { let w = if i % 2 == 0 { 1 } else { 3 }; sum += ean13[i] as u32 * w; }
         ean13[12] = ((10 - (sum % 10)) % 10) as u8;
     } else {
         for i in 0..13 { ean13[i] = ds[i]; }
@@ -267,7 +241,5 @@ pub fn synthesize_ideal_row(digits: &str, unit: usize) -> Vec<u8> {
 
 #[cfg(test)]
 fn mask_at(mask: (bool,bool,bool,bool,bool,bool), idx: usize) -> bool {
-    match idx {
-        0 => mask.0, 1 => mask.1, 2 => mask.2, 3 => mask.3, 4 => mask.4, 5 => mask.5, _ => false
-    }
+    match idx { 0 => mask.0, 1 => mask.1, 2 => mask.2, 3 => mask.3, 4 => mask.4, 5 => mask.5, _ => false }
 }

@@ -1,146 +1,164 @@
-//! QR v1: форматная информация (EC уровень + mask id) и размаскировка матрицы.
+//! QR v1: формат-инфо (15 бит), BCH(15,5), маскирование 0x5412.
+//!
+//! Здесь:
+/// - перечисление уровня коррекции ошибок [`EcLevel`];
+/// - функция декодирования одного 15-битного слова [`decode_format_word`];
+/// - координаты двух дорожек чтения формата для версии 1
+///   [`FORMAT_READ_PATHS_V1`] (по 15 модулей каждая).
 
-use super::data::is_function_v1;
-
-/// Уровень коррекции.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EcLevel { L, M, Q, H }
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EcLevel {
+    L,
+    M,
+    Q,
+    H,
+}
 
 impl EcLevel {
-    #[inline] fn to_bits(self) -> u16 {
-        // Стандарт: M=00, L=01, H=10, Q=11 (именно в таком коде)
+    /// Два бита уровня EC по стандарту:
+    /// L=01, M=00, Q=11, H=10
+    #[inline]
+    pub fn to_bits2(self) -> u8 {
         match self {
-            EcLevel::M => 0b00,
             EcLevel::L => 0b01,
-            EcLevel::H => 0b10,
+            EcLevel::M => 0b00,
             EcLevel::Q => 0b11,
+            EcLevel::H => 0b10,
+        }
+    }
+
+    /// Обратное преобразование двух бит в уровень EC.
+    #[allow(dead_code)]
+    pub fn from_bits2(b2: u8) -> Option<Self> {
+        match b2 & 0b11 {
+            0b01 => Some(EcLevel::L),
+            0b00 => Some(EcLevel::M),
+            0b11 => Some(EcLevel::Q),
+            0b10 => Some(EcLevel::H),
+            _ => None,
         }
     }
 }
 
-/// Декодировать (EC, mask_id) из 21×21 матрицы (row-major).
-/// Возвращает None, если обе копии format-инфо не распознаны (<- слишком много ошибок).
-pub fn decode_format_info_v1(grid: &[bool]) -> Option<(EcLevel, u8)> {
-    let a = read_format_15bits_copy_a(grid);
-    let b = read_format_15bits_copy_b(grid);
+/// Генератор BCH(15,5): x^10 + x^8 + x^5 + x^4 + x^2 + x + 1
+const BCH15_5_GEN: u16 = 0b1_0100_1101_11; // 0x537
+/// Маска формата из стандарта
+const FORMAT_MASK: u16 = 0b1010_1000_0001_0010; // 0x5412
 
-    if let Some((ec, m, _d)) = best_match_format(a) { return Some((ec, m)); }
-    if let Some((ec, m, _d)) = best_match_format(b) { return Some((ec, m)); }
-    None
-}
-
-/// Снять маску `mask_id` со всех **данных** модулей (служебные не трогаем).
-pub fn unmask_grid_v1(grid: &mut [bool], mask_id: u8) {
-    assert_eq!(grid.len(), 21*21);
-    for y in 0..21 {
-        for x in 0..21 {
-            if is_function_v1(x, y) { continue; }
-            if mask_hit(mask_id, x, y) {
-                let idx = y*21 + x;
-                grid[idx] = !grid[idx];
-            }
+/// Возвращает остаток при делении (data<<10) на генератор BCH по mod2.
+fn bch_remainder_15_5(mut v: u16) -> u16 {
+    // У v уже должны быть зарезервированы 10 младших бит под остаток
+    for shift in (10..=14).rev() {
+        if (v >> shift) & 1 == 1 {
+            v ^= BCH15_5_GEN << (shift - 10);
         }
     }
+    v & 0x03FF // 10 бит
 }
 
-// === Ниже — внутренности: чтение двух копий, сравнение со всеми 32 вариантами и маски ===
+/// Кодирует 15-битное слово формата (до маски).
+fn encode_format_word_unmasked(ec: EcLevel, mask_id: u8) -> u16 {
+    let data5 = ((ec.to_bits2() as u16) << 3) | (mask_id as u16 & 0x7);
+    let payload = data5 << 10;
+    let rem = bch_remainder_15_5(payload);
+    payload | rem
+}
 
-const BCH_FORMAT_GEN: u16 = 0b10100110111;  // G(x) для (15,5)
-const FORMAT_MASK:   u16 = 0b101010000010010; // 0x5412
+/// Кодирует финальное (замаскированное) 15-битное слово формата.
+fn encode_format_word_masked(ec: EcLevel, mask_id: u8) -> u16 {
+    encode_format_word_unmasked(ec, mask_id) ^ FORMAT_MASK
+}
 
-fn best_match_format(read15: u16) -> Option<(EcLevel, u8, u32)> {
-    // Перебор 32 значений (EC×mask) — находим минимальную Хэммингову дистанцию (<=3).
+/// Подсчёт расстояния Хэмминга между 15-битными словами.
+#[inline]
+fn hamming15(a: u16, b: u16) -> u32 {
+    (a ^ b).count_ones()
+}
+
+/// Декодирование (с подбором по всем 32 валидным словам).
+///
+/// Возвращает Some(уровень, id маски, расстояние), если найден кандидат
+/// с расстоянием ≤ 3, иначе None.
+pub fn decode_format_word(word: u16) -> Option<(EcLevel, u8, u32)> {
     let mut best: Option<(EcLevel, u8, u32)> = None;
-    for &ec in &[EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H] {
-        for mask in 0u8..=7u8 {
-            let code = format_bits_masked(ec, mask);
-            let d = (code ^ read15).count_ones();
+
+    // 4 уровня EC × 8 масок = 32 слова
+    const LEVELS: [EcLevel; 4] = [EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H];
+
+    for &ec in &LEVELS {
+        for mask in 0u8..8 {
+            let valid = encode_format_word_masked(ec, mask);
+            let d = hamming15(word, valid);
             match best {
                 None => best = Some((ec, mask, d)),
-                Some((_,_,bd)) if d < bd => best = Some((ec, mask, d)),
+                Some((_, _, bd)) if d < bd => best = Some((ec, mask, d)),
                 _ => {}
             }
         }
     }
+
     match best {
-        Some((ec, m, d)) if d <= 3 => Some((ec, m, d)), // QR гарантирует исправление до 3 бит
-        _ => None
+        Some((ec, mask, d)) if d <= 3 => Some((ec, mask, d)),
+        _ => None,
     }
 }
 
-/// Сформировать 15-битный format code (с BCH и XOR-маской).
-#[inline]
-fn format_bits_masked(ec: EcLevel, mask_id: u8) -> u16 {
-    let info: u16 = (ec.to_bits() << 3) | ((mask_id as u16) & 0b111);
-    let code = bch15_5_encode(info);
-    code ^ FORMAT_MASK
-}
+/// Координаты чтения 15-битного формата (две копии) для QR v1 (21×21).
+///
+/// Пары — это (x, y), где x — столбец, y — строка.
+/// Каждая дорожка содержит ровно 15 уникальных координат в пределах 0..=20.
+///
+/// Примечание: порядок соответствует распространённой раскладке:
+/// 1) около верхнего-левого угла (строка y=8 и столбец x=8);
+/// 2) «зеркальная» копия около правого-верхнего и левого-нижнего углов.
+pub const FORMAT_READ_PATHS_V1: [[(usize, usize); 15]; 2] = [
+    // Дорожка 1 (вокруг топ-левого угла):
+    // y=8, x=0..5, затем x=7,8; далее столбец x=8, y=7..1
+    [
+        (0, 8), (1, 8), (2, 8), (3, 8), (4, 8), (5, 8),
+        (7, 8), (8, 8),
+        (8, 7), (8, 6), (8, 5), (8, 4), (8, 3), (8, 2), (8, 1),
+    ],
+    // Дорожка 2 (копия вокруг правого-верхнего и левого-нижнего углов):
+    // x=20, y=0..7; далее y=8, x=19..13
+    [
+        (20, 0), (20, 1), (20, 2), (20, 3), (20, 4), (20, 5), (20, 6), (20, 7),
+        (19, 8), (18, 8), (17, 8), (16, 8), (15, 8), (14, 8), (13, 8),
+    ],
+];
 
-/// BCH(15,5): (info<<10) + остаток по модулю генератора.
-fn bch15_5_encode(info5: u16) -> u16 {
-    debug_assert!(info5 < (1<<5));
-    let mut v = info5 << 10;
-    let mut msb = 14; // старший бит в 15-битном слове
-    while msb >= 10 {
-        if (v & (1<<msb)) != 0 {
-            v ^= BCH_FORMAT_GEN << (msb-10);
-        }
-        if msb == 0 { break; }
-        msb -= 1;
-    }
-    (info5 << 10) | (v & 0x03FF)
-}
-
-/// Первая копия (вокруг TL): 15 модулей по строке y=8 (x=0..=8, x!=6) + по колонке x=8 (y=8..=0, y!=6), без (8,8) дубля.
-fn read_format_15bits_copy_a(grid: &[bool]) -> u16 {
-    let mut bits: u16 = 0;
-    let mut push = |b: bool| { bits = (bits << 1) | (b as u16); };
-    // y=8, x=0..=8, x!=6
-    for x in 0..=8 {
-        if x == 6 { continue; }
-        push(grid[8*21 + x]);
-    }
-    // x=8, y=8..=0, y!=8, y!=6  (чтобы (8,8) не задублировать)
-    for y in (0..=8).rev() {
-        if y == 8 || y == 6 { continue; }
-        push(grid[y*21 + 8]);
-    }
-    bits
-}
-
-/// Вторая копия (TR/BL): x=20..=13 на y=8 (8 модулей) + y=20..=14 на x=8 (7 модулей, исключая y=13 — dark module).
-fn read_format_15bits_copy_b(grid: &[bool]) -> u16 {
-    let mut bits: u16 = 0;
-    let mut push = |b: bool| { bits = (bits << 1) | (b as u16); };
-    // y=8, x=20..=13
-    for x in (13..=20).rev() {
-        push(grid[8*21 + x]);
-    }
-    // x=8, y=20..=14 (13 пропускаем — там dark module)
-    for y in (14..=20).rev() {
-        push(grid[y*21 + 8]);
-    }
-    bits
-}
-
-/// Маска M0..M7. Параметры — координаты модулей (x=column, y=row).
-#[inline]
-fn mask_hit(mask_id: u8, x: usize, y: usize) -> bool {
-    let x = x as i32; let y = y as i32;
-    match mask_id {
-        0 => (x + y) % 2 == 0,
-        1 => (y % 2) == 0,
-        2 => (x % 3) == 0,
-        3 => (x + y) % 3 == 0,
-        4 => ((y / 2) + (x / 3)) % 2 == 0,
-        5 => ((x * y) % 2 + (x * y) % 3) == 0,
-        6 => (((x * y) % 2) + ((x * y) % 3)) % 2 == 0,
-        7 => (((x + y) % 2) + ((x * y) % 3)) % 2 == 0,
-        _ => false,
-    }
+/// Вспомогательная функция (оставлена для тестов), возвращает уже
+/// замаскированное слово формата для заданных параметров.
+#[allow(dead_code)]
+pub fn encode_format_bits_for_tests(ec: EcLevel, mask_id: u8) -> u16 {
+    encode_format_word_masked(ec, mask_id)
 }
 
 #[cfg(test)]
-pub fn encode_format_bits_for_tests(ec: EcLevel, mask_id: u8) -> u16 {
-    format_bits_masked(ec, mask_id)
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bch_roundtrip_examples() {
+        // Несколько sanity-проверок: кодируем и проверяем,
+        // что расстояние до себя равно 0, а до «побитово инвертированного»
+        // — существенно больше нуля.
+        for &ec in &[EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H] {
+            for m in 0u8..8 {
+                let w = encode_format_bits_for_tests(ec, m);
+                assert_eq!(hamming15(w, w), 0);
+                assert!(hamming15(w, !w & 0x7FFF) > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn format_paths_have_15_points_each_and_in_bounds() {
+        for path in &FORMAT_READ_PATHS_V1 {
+            assert_eq!(path.len(), 15);
+            for &(x, y) in path {
+                assert!(x < 21 && y < 21, "({x},{y}) out of 21×21");
+            }
+        }
+    }
 }

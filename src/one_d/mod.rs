@@ -1,5 +1,5 @@
-pub mod ean13;
 pub mod code128;
+pub mod ean13;
 
 use crate::GrayImage;
 
@@ -50,7 +50,11 @@ pub fn decode_ean13_upca(img: &GrayImage<'_>, opts: &DecodeOptions) -> Vec<Barco
             } else {
                 (BarcodeFormat::EAN13, text)
             };
-            out.push(Barcode { format, text: normalized, row: y });
+            out.push(Barcode {
+                format,
+                text: normalized,
+                row: y,
+            });
             continue;
         }
 
@@ -63,7 +67,11 @@ pub fn decode_ean13_upca(img: &GrayImage<'_>, opts: &DecodeOptions) -> Vec<Barco
             } else {
                 (BarcodeFormat::EAN13, text)
             };
-            out.push(Barcode { format, text: normalized, row: y });
+            out.push(Barcode {
+                format,
+                text: normalized,
+                row: y,
+            });
         }
     }
     out
@@ -78,14 +86,22 @@ pub fn decode_code128(img: &GrayImage<'_>, opts: &DecodeOptions) -> Vec<Barcode>
         let row = img.row(y);
 
         if let Some(text) = code128::decode_row(row, opts) {
-            out.push(Barcode { format: BarcodeFormat::Code128, text, row: y });
+            out.push(Barcode {
+                format: BarcodeFormat::Code128,
+                text,
+                row: y,
+            });
             continue;
         }
 
         let mut rev = row.to_vec();
         rev.reverse();
         if let Some(text) = code128::decode_row(&rev, opts) {
-            out.push(Barcode { format: BarcodeFormat::Code128, text, row: y });
+            out.push(Barcode {
+                format: BarcodeFormat::Code128,
+                text,
+                row: y,
+            });
         }
     }
     out

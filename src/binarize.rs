@@ -14,12 +14,18 @@
 /// Простой «Otsu-like» порог: среднее и середина (min+max)/2.
 #[inline]
 pub fn otsu_like_threshold(row: &[u8]) -> u8 {
-    if row.is_empty() { return 0; }
+    if row.is_empty() {
+        return 0;
+    }
     let (mut min_v, mut max_v) = (u8::MAX, 0u8);
     let mut sum: u64 = 0;
     for &v in row {
-        if v < min_v { min_v = v; }
-        if v > max_v { max_v = v; }
+        if v < min_v {
+            min_v = v;
+        }
+        if v > max_v {
+            max_v = v;
+        }
         sum += v as u64;
     }
     let mean = (sum / row.len() as u64) as u8;
@@ -38,11 +44,17 @@ pub fn binarize_row(row: &[u8]) -> Vec<bool> {
 /// небольшой `bias` смещает порог в «чёрную» сторону.
 pub fn binarize_row_adaptive(row: &[u8]) -> Vec<bool> {
     let n = row.len();
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
 
     let mut win = n / 32;
-    if win < 8 { win = 8; }
-    if win > 64 { win = 64; }
+    if win < 8 {
+        win = 8;
+    }
+    if win > 64 {
+        win = 64;
+    }
     let bias: i32 = 5;
 
     // prefix sums
@@ -67,7 +79,9 @@ pub fn binarize_row_adaptive(row: &[u8]) -> Vec<bool> {
 
 /// Превратить бинарную строку (true=чёрный) в run-lengths (ширины подряд идущих баров/пробелов).
 pub fn runs(row_bin: &[bool]) -> Vec<usize> {
-    if row_bin.is_empty() { return Vec::new(); }
+    if row_bin.is_empty() {
+        return Vec::new();
+    }
     let mut v = Vec::new();
     let mut cur = row_bin[0];
     let mut len = 1usize;
@@ -91,7 +105,9 @@ pub fn runs(row_bin: &[bool]) -> Vec<usize> {
 /// 1) Оценить базовый модуль как медиану нижней половины run-ов (устойчив к «толстой лапе»).
 /// 2) Квантовать каждую ширину в 1..4 округлением к ближайшему целому.
 pub fn normalize_modules(row_bin: &[bool], rl: &[usize]) -> (Vec<u8>, bool) {
-    if rl.is_empty() { return (Vec::new(), false); }
+    if rl.is_empty() {
+        return (Vec::new(), false);
+    }
 
     // Базовый модуль — «тонкие» полосы (нижняя половина).
     let mut sorted = rl.to_vec();
@@ -105,7 +121,8 @@ pub fn normalize_modules(row_bin: &[bool], rl: &[usize]) -> (Vec<u8>, bool) {
             thin_slice[mid] as f32
         } else {
             (thin_slice[mid - 1] as f32 + thin_slice[mid] as f32) * 0.5
-        }.max(1.0)
+        }
+        .max(1.0)
     };
 
     let mut mods: Vec<u8> = Vec::with_capacity(rl.len());
@@ -132,7 +149,7 @@ mod tests {
 
     #[test]
     fn binarize_shapes_runs() {
-        let row = [255u8,255, 0,0,0, 255, 0,0];
+        let row = [255u8, 255, 0, 0, 0, 255, 0, 0];
         let b = binarize_row(&row);
         let r = runs(&b);
         assert!(!r.is_empty());
@@ -140,8 +157,8 @@ mod tests {
 
     #[test]
     fn normalize_simple() {
-        let row_bin = [true,false,true,false,true];
-        let rl = [1usize,1,3,1,1];
+        let row_bin = [true, false, true, false, true];
+        let rl = [1usize, 1, 3, 1, 1];
         let (mods, starts_black) = normalize_modules(&row_bin, &rl);
         assert_eq!(mods.len(), rl.len());
         assert_eq!(starts_black, true);

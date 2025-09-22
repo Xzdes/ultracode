@@ -27,7 +27,8 @@ pub fn is_function_v1(x: usize, y: usize) -> bool {
     // Finder+separator прямоугольники:
     if (x <= 8 && y <= 8)            // левый верхний 9×9
         || (x >= N1 - 8 && y <= 8)   // правый верхний 8×9
-        || (x <= 8 && y >= N1 - 8)   // левый нижний 9×8
+        || (x <= 8 && y >= N1 - 8)
+    // левый нижний 9×8
     {
         return true;
     }
@@ -50,7 +51,7 @@ pub fn walk_pairs_v1() -> Vec<(usize, usize)> {
     let mut out = Vec::with_capacity(N1 * N1);
 
     let mut x: isize = (N1 as isize) - 1; // 20 при N1=21
-    let mut upward = true;                // первая пара идём вверх
+    let mut upward = true; // первая пара идём вверх
 
     // пары колонок: (x, x-1)
     while x > 0 {
@@ -87,9 +88,6 @@ pub fn walk_pairs_v1() -> Vec<(usize, usize)> {
     out
 }
 
-
-
-
 /// Снять ровно 208 data-бит (без служебных) согласно маршруту [`walk_pairs_v1`].
 pub fn extract_data_bits_v1(grid: &[bool]) -> Vec<bool> {
     debug_assert_eq!(grid.len(), N1 * N1);
@@ -117,7 +115,9 @@ mod tests {
         let mut func = 0usize;
         for y in 0..N1 {
             for x in 0..N1 {
-                if is_function_v1(x, y) { func += 1; }
+                if is_function_v1(x, y) {
+                    func += 1;
+                }
             }
         }
         let data = N1 * N1 - func;
@@ -125,24 +125,23 @@ mod tests {
         assert_eq!(data, 208, "data modules count");
     }
 
-#[test]
-fn walk_pairs_basic_properties() {
-    let path = walk_pairs_v1();
+    #[test]
+    fn walk_pairs_basic_properties() {
+        let path = walk_pairs_v1();
 
-    // 1) длина: вся сетка (включая timing-колонку x=6)
-    assert_eq!(path.len(), N1 * N1);
+        // 1) длина: вся сетка (включая timing-колонку x=6)
+        assert_eq!(path.len(), N1 * N1);
 
-    // 2) нет дубликатов; координаты валидны
-    let mut seen = vec![false; N1 * N1];
-    for &(x, y) in &path {
-        assert!(x < N1 && y < N1, "out of bounds: ({x},{y})");
-        let idx = y * N1 + x;
-        assert!(!seen[idx], "duplicate coord in path: ({x},{y})");
-        seen[idx] = true;
+        // 2) нет дубликатов; координаты валидны
+        let mut seen = vec![false; N1 * N1];
+        for &(x, y) in &path {
+            assert!(x < N1 && y < N1, "out of bounds: ({x},{y})");
+            let idx = y * N1 + x;
+            assert!(!seen[idx], "duplicate coord in path: ({x},{y})");
+            seen[idx] = true;
+        }
+
+        // 3) правый нижний модуль идёт первым
+        assert_eq!(path[0], (N1 - 1, N1 - 1));
     }
-
-    // 3) правый нижний модуль идёт первым
-    assert_eq!(path[0], (N1 - 1, N1 - 1));
-}
-
 }

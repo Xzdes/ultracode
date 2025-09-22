@@ -1,13 +1,18 @@
 //! Мини Reed–Solomon для QR (GF(256), poly 0x11D), для генерации ECC в синтетике.
 
-#[inline] fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+#[inline]
+fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     // Быстрый «русский крестьянский» на поле 0x11D
     let mut res = 0u8;
     while b != 0 {
-        if (b & 1) != 0 { res ^= a; }
+        if (b & 1) != 0 {
+            res ^= a;
+        }
         let hi = (a & 0x80) != 0;
         a <<= 1;
-        if hi { a ^= 0x1D; } // неприв. полином без старшего бита (0x11D -> 0x1D)
+        if hi {
+            a ^= 0x1D;
+        } // неприв. полином без старшего бита (0x11D -> 0x1D)
         b >>= 1;
     }
     res
@@ -16,9 +21,11 @@
 fn poly_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; a.len() + b.len() - 1];
     for (i, &ai) in a.iter().enumerate() {
-        if ai == 0 { continue; }
+        if ai == 0 {
+            continue;
+        }
         for (j, &bj) in b.iter().enumerate() {
-            out[i+j] ^= gf_mul(ai, bj);
+            out[i + j] ^= gf_mul(ai, bj);
         }
     }
     out
@@ -46,7 +53,9 @@ pub fn rs_ec_bytes(data: &[u8], ec_len: usize) -> Vec<u8> {
 
     for i in 0..data.len() {
         let coef = msg[i];
-        if coef == 0 { continue; }
+        if coef == 0 {
+            continue;
+        }
         for j in 0..g.len() {
             msg[i + j] ^= gf_mul(coef, g[j]);
         }
@@ -61,7 +70,9 @@ mod tests {
     #[test]
     fn rs_simple_known() {
         // Короткая проверка на инвариант: если data=0.., то ec не нули.
-        let data = [1u8,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19];
+        let data = [
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+        ];
         let ec = rs_ec_bytes(&data, 7);
         assert_eq!(ec.len(), 7);
         assert!(ec.iter().any(|&b| b != 0));

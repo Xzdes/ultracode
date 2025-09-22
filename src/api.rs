@@ -11,17 +11,21 @@ pub struct Decoder;
 
 impl Decoder {
     #[inline]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Default)]
 pub struct Pipeline {
-    dec: Decoder,
+    _dec: Decoder,
 }
 
 impl Pipeline {
     #[inline]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Высокоуровневая функция «распознай всё» на изображении.
     /// Сейчас — заглушка; вернёт пустой список, если ты не подключишь

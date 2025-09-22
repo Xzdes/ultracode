@@ -1,5 +1,5 @@
 use std::env;
-use ultracode::{GrayImage, decode_any, DecodeOptions, synthesize_row_code128};
+use ultracode::{decode_any, synthesize_row_code128, DecodeOptions, GrayImage};
 
 fn main() {
     let mut text = String::from("HELLO-128");
@@ -13,12 +13,35 @@ fn main() {
     let mut args = env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--text" => if let Some(v) = args.next() { text = v; },
-            "--set" => if let Some(v) = args.next() { set = v.chars().next().unwrap_or('B'); },
-            "--unit" => if let Some(v) = args.next() { unit = v.parse().unwrap_or(2); },
-            "--height" => if let Some(v) = args.next() { height = v.parse().unwrap_or(64); },
-            "--write-pgm" => if let Some(v) = args.next() { write_pgm = Some(v); },
-            "--help" | "-h" => { print_help(); return; }
+            "--text" => {
+                if let Some(v) = args.next() {
+                    text = v;
+                }
+            }
+            "--set" => {
+                if let Some(v) = args.next() {
+                    set = v.chars().next().unwrap_or('B');
+                }
+            }
+            "--unit" => {
+                if let Some(v) = args.next() {
+                    unit = v.parse().unwrap_or(2);
+                }
+            }
+            "--height" => {
+                if let Some(v) = args.next() {
+                    height = v.parse().unwrap_or(64);
+                }
+            }
+            "--write-pgm" => {
+                if let Some(v) = args.next() {
+                    write_pgm = Some(v);
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
             other => {
                 eprintln!("Неизвестный аргумент: {other}");
                 print_help();
@@ -30,8 +53,14 @@ fn main() {
     let row = synthesize_row_code128(&text, set, unit);
     let width = row.len();
     let mut img_buf = Vec::with_capacity(width * height);
-    for _ in 0..height { img_buf.extend_from_slice(&row); }
-    let img = GrayImage { width, height, data: &img_buf };
+    for _ in 0..height {
+        img_buf.extend_from_slice(&row);
+    }
+    let img = GrayImage {
+        width,
+        height,
+        data: &img_buf,
+    };
 
     let opts = DecodeOptions::default();
     let results = decode_any(img, opts);
@@ -55,7 +84,7 @@ fn main() {
 
 fn print_help() {
     eprintln!(
-r#"Использование:
+        r#"Использование:
   cargo run --bin scan_code128_synth -- [--text <ASCII>] [--set A|B|C] [--unit <px>] [--height <px>] [--write-pgm <file.pgm>]
 
 По умолчанию генерируется Code128-B "HELLO-128" с unit=2 и height=64.

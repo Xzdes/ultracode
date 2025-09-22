@@ -1,10 +1,10 @@
 //! Модуль QR (v1): чтение двух копий 15-битного формат-инфо из матрицы,
 //! упаковка битов и выбор лучшего кандидата по расстоянию Хэмминга.
 
-pub mod format;
 pub mod data;
-pub mod rs;
 pub mod encode;
+pub mod format;
+pub mod rs;
 
 use self::format::{decode_format_word, EcLevel, FORMAT_READ_PATHS_V1};
 

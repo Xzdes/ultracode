@@ -17,7 +17,11 @@ impl<'a> GrayImage<'a> {
     #[inline]
     pub fn new(data: &'a [u8], width: usize, height: usize) -> Self {
         debug_assert_eq!(data.len(), width * height);
-        Self { data, width, height }
+        Self {
+            data,
+            width,
+            height,
+        }
     }
 
     /// Срез строки `y` (0..height).
@@ -47,7 +51,9 @@ pub struct Point {
 
 impl Point {
     #[inline]
-    pub fn new(x: f32, y: f32) -> Self { Self { x, y } }
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
 }
 
 /// Четырёхугольник (рамка найденного символа).
@@ -69,12 +75,12 @@ impl Quad {
 /// Ориентация/поворот символа относительно входной картинки.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Orientation {
-    Upright,   // 0°
-    Rot90,     // 90°
-    Rot180,    // 180°
-    Rot270,    // 270°
-    MirrorH,   // зеркалирование по горизонтали
-    MirrorV,   // зеркалирование по вертикали
+    Upright, // 0°
+    Rot90,   // 90°
+    Rot180,  // 180°
+    Rot270,  // 270°
+    MirrorH, // зеркалирование по горизонтали
+    MirrorV, // зеркалирование по вертикали
 }
 
 /// Тип распознанного символа.
@@ -94,7 +100,11 @@ pub struct DecodedExtras {
 
 impl DecodedExtras {
     #[inline]
-    pub fn new() -> Self { Self { properties: BTreeMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            properties: BTreeMap::new(),
+        }
+    }
 
     #[inline]
     pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -108,7 +118,7 @@ impl DecodedExtras {
 pub struct DecodedSymbol {
     pub symbology: Symbology,
     pub text: String,
-    pub confidence: f32,            // 0..=1
+    pub confidence: f32, // 0..=1
     pub quad: Option<Quad>,
     pub orientation: Option<Orientation>,
     pub bytes: Option<Vec<u8>>,
@@ -129,11 +139,31 @@ impl DecodedSymbol {
         }
     }
 
-    #[inline] pub fn with_confidence(mut self, c: f32) -> Self { self.confidence = c; self }
-    #[inline] pub fn with_quad(mut self, q: Quad) -> Self { self.quad = Some(q); self }
-    #[inline] pub fn with_orientation(mut self, o: Orientation) -> Self { self.orientation = Some(o); self }
-    #[inline] pub fn with_bytes(mut self, raw: Vec<u8>) -> Self { self.bytes = Some(raw); self }
-    #[inline] pub fn with_extras(mut self, extras: DecodedExtras) -> Self { self.extras = extras; self }
+    #[inline]
+    pub fn with_confidence(mut self, c: f32) -> Self {
+        self.confidence = c;
+        self
+    }
+    #[inline]
+    pub fn with_quad(mut self, q: Quad) -> Self {
+        self.quad = Some(q);
+        self
+    }
+    #[inline]
+    pub fn with_orientation(mut self, o: Orientation) -> Self {
+        self.orientation = Some(o);
+        self
+    }
+    #[inline]
+    pub fn with_bytes(mut self, raw: Vec<u8>) -> Self {
+        self.bytes = Some(raw);
+        self
+    }
+    #[inline]
+    pub fn with_extras(mut self, extras: DecodedExtras) -> Self {
+        self.extras = extras;
+        self
+    }
 }
 
 /// Утилиты для GrayImage с корректными lifetime.
@@ -164,7 +194,9 @@ impl<'a> GrayImageExt for GrayImage<'a> {
         out.clear();
         out.resize(w, 0);
 
-        if w == 0 { return &out[..]; }
+        if w == 0 {
+            return &out[..];
+        }
 
         // Префикс-суммы для быстрого среднего по окну
         let mut ps: Vec<u32> = Vec::with_capacity(w + 1);

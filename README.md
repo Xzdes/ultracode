@@ -1,62 +1,67 @@
 # ultracode
 
-Zero-deps, high-performance barcode engine in Rust.  
-**Now:** EAN-13 / UPC-A via scanlines.  
-**Next:** QR (finder + warp + RS), Code128, Code39.
+Быстрый и минималистичный декодер штрих-кодов на Rust. Сейчас поддерживаются:
 
-## Why raw grayscale?
-Avoids image parsing dependencies and lets you feed frames directly from camera or your own loader.  
-`u8` buffer is row-major, 1 byte per pixel.
+- **EAN-13 / UPC-A** (1D)
+- **Code128** (наборы A/B/C, checksum, поиск STOP справа-налево)
+- **QR (частично)**: утилиты для формат-слова (BCH, пути чтения и упаковка битов) — полноценный e2e-декодер QR *пока в работе*.
 
-## Usage
+Проект без внешних зависимостей (только `std`). В комплекте идут утилиты для синтетики и тестовые бинарники.
 
-```rust
-use ultracode::{GrayImage, decode_any, DecodeOptions};
+## Быстрый старт
 
-let width = 640usize;
-let height = 480usize;
-let frame: Vec<u8> = vec![128; width*height]; // your grayscale data
+```bash
+# сборка
+cargo build
 
-let img = GrayImage { width, height, data: &frame };
-let opts = DecodeOptions::default();
-let results = decode_any(img, opts);
-
-for b in results {
-    println!("{:?}: {}", b.format, b.text);
-}
+# тесты
+cargo test
 ````
 
-## Performance tips
+Ожидаемый вывод сейчас — все юнит-тесты для 1D и QR-утилит проходят.
 
-* Pre-crop ROI around expected barcode area.
-* Increase `scan_rows` only if нужно (default 15).
-* Feed good contrast (auto-exposure/auto-gain).
-* For real-time video, scan только соседние кадры и кэшируй последние успешные результаты.
+## Демонстрационные утилиты
 
-## License
+В репозитории есть 3 бинарника (см. `src/bin`):
 
-MIT OR Apache-2.0
+* `scan_synthetic` — пример работы с синтетическими рядами EAN-13.
+* `scan_pgm` — чтение простых PGM-изображений и попытка распознать строку штрих-кода.
+* `scan_code128_synth` — генерация и сканирование синтетики Code128.
 
+Примеры запуска:
+
+```bash
+# помощь по ключам
+cargo run --bin scan_synthetic -- --help
+cargo run --bin scan_pgm -- --help
+cargo run --bin scan_code128_synth -- --help
+
+# пример: сгенерировать и проверить Code128
+cargo run --bin scan_code128_synth
+
+# пример: прогнать синтетику EAN-13
+cargo run --bin scan_synthetic
 ```
 
----
+## Структура
 
-### что дальше (план расширения под «все форматы» и «молниеносно»)
+* `src/lib.rs` — публичный API библиотеки.
+* `src/one_d/` — декодеры 1D:
 
-1) **Скорость без зависимостей**
-   - обработка только над `&[u8]`, без аллокаций в горячем пути;
-   - предвычислять пороги на несколько линий разом; реюзить буферы `Vec<bool>` и `Vec<usize>`;
-   - добавить SIMD (nightly) через `core::arch` для сумм/минимов по строкам (опционально, фича-флаг).
+  * `ean13.rs` — распознавание EAN-13/UPC-A.
+  * `code128.rs` — распознавание Code128 (A/B/C, SHIFT, FNC1, checksum).
+* `src/qr/` — утилиты для QR:
 
-2) **Поддержка форматов**
-   - 1D: Code128 (таблица 107 паттернов), Code39, Interleaved 2 of 5.
-   - 2D: QR (v1-v5 сначала), потом DataMatrix (L-shape finder проще, но нужен Reed–Solomon GF(256)).
+  * `format.rs` — BCH для формат-слова, пути чтения, упаковка битов.
+  * `mod.rs` — вспомогательные функции и тесты на формат-слово.
+* `src/bin/` — демонстрационные программы.
 
-3) **QR реализация**
-   - поиск паттернов через скан-линии (как сейчас для 1D) + проверка соотношений 1:1:3:1:1;
-   - кластеризация центров (без зависимостей: k-means «вручную» или RANSAC-подобная оценка тройки);
-   - warp в сетку через обратную проекцию 3×3 (solve homography по трём углам — закрытая форма);
-   - декодер RS: реализовать GF(256) с x^8 + x^4 + x^3 + x^2 + 1, таблицы log/exp.
+## Состояние QR
 
-если хочешь — в следующем шаге могу дописать быстрый детектор Code128 или первый «сканер» QR (finder patterns). скажи, в каком направлении продолжать, и я пришлю **полные файлы** так же, как выше.
-```
+QR сейчас ограничен обработкой **format word** (BCH и чтение с фиксированных путей), чтобы упростить базу и держать тесты стабильными. Когда будет готово:
+
+* поиск finder-паттернов,
+* выравнивание/семплинг,
+* RS-декодирование блоков,
+
+добавим e2e-тесты и полную интеграцию в общий `decode`.

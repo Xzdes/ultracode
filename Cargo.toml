@@ -2,16 +2,25 @@
 name = "ultracode"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
-description = "Zero-deps, high-performance barcode (EAN-13/UPC-A now) and QR engine for grayscale buffers."
-repository = ""
+description = "Быстрый и минималистичный декодер штрих-кодов: EAN-13/UPC-A и Code128 (+ утилиты для QR Format). В комплекте демо-бинари и синтетическая генерация."
 readme = "README.md"
-categories = ["multimedia::images", "no-std"] # фактически используем std, но без зависимостей
+license = "MIT"
+keywords = ["barcode", "ean13", "upc-a", "code128", "qrcode", "decoder"]
+categories = ["multimedia::images", "algorithms", "command-line-utilities"]
 
 [lib]
-name = "ultracode"
 path = "src/lib.rs"
 
-[features]
-# на будущее: опции для no_std и SIMD (nightly)
-default = []
+[dependencies]
+
+[[bin]]
+name = "scan_synthetic"
+path = "src/bin/scan_synthetic.rs"
+
+[[bin]]
+name = "scan_pgm"
+path = "src/bin/scan_pgm.rs"
+
+[[bin]]
+name = "scan_code128_synth"
+path = "src/bin/scan_code128_synth.rs"

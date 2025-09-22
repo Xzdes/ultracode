@@ -1,59 +1,107 @@
-//! Извлечение битов данных QR v1 (21×21) из матрицы модулей.
+//! QR v1 (21×21): служебные зоны и порядок обхода «парами колонок».
+//!
+//! Здесь три ключевые вещи:
+//! 1) [`is_function_v1`] — пометка служебных модулей (finder+separator, timing,
+//!    format и т.п.) — они не несут data/ECC бит.
+//! 2) [`walk_pairs_v1`] — правильный маршрут чтения модулей для извлечения бит:
+//!    идём парами колонок (x, x-1) справа налево, «змейкой» по y. Колонку x=6
+//!    (timing) пропускаем как пару — т.е. после x=7 сразу x=5.
+//! 3) [`extract_data_bits_v1`] — снимаем только data-модули (ровно 208 бит для v1).
+//!
+//! Важно: реализация подобрана так, чтобы общее число служебных модулей было 233,
+//! а число data-модулей — 208 (19 data CW + 7 ECC CW = 26 байт = 208 бит).
 
-/// Возвращает 208 бит (26 кодвордов × 8) в порядке стандарта (правый нижний угол, двумя колонками, «змейкой»).
-pub fn extract_data_bits_v1(grid: &[bool]) -> Vec<bool> {
-    assert_eq!(grid.len(), 21*21, "ожидается матрица 21×21 (row-major)");
-    let mut out = Vec::with_capacity(208);
+/// Размер сетки для версии 1.
+pub const N1: usize = 21;
 
-    for (x, y) in walk_pairs_v1() {
-        if is_function_v1(x, y) { continue; }
-        let bit = grid[y * 21 + x];
-        out.push(bit);
-        if out.len() == 208 { break; }
+/// Является ли модуль служебным (не data/ECC) для QR v1.
+///
+/// Покрываем:
+/// - Finder + белые сепараторы вокруг (три угла): прямоугольники 9×9 / 8×9 / 9×8.
+/// - Timing-линии: вся колонка x=6 и вся строка y=6 (кроме зон finder — они уже
+///   попадают в прямоугольники).
+/// - Формат-поля оказываются внутри этих прямоугольников.
+/// - «Тёмный модуль» (dark module) для v1 расположен в левом нижнем блоке,
+///   он тоже попадает в соответствующий прямоугольник, поэтому отдельно его
+///   не отмечаем.
+#[inline]
+pub fn is_function_v1(x: usize, y: usize) -> bool {
+    debug_assert!(x < N1 && y < N1);
+
+    // Finder+separator прямоугольники:
+    //  - левый верхний 9×9: x<=8, y<=8
+    //  - правый верхний 8×9: x>=N-8, y<=8
+    //  - левый нижний 9×8: x<=8, y>=N-8
+    if (x <= 8 && y <= 8) || (x >= N1 - 8 && y <= 8) || (x <= 8 && y >= N1 - 8) {
+        return true;
     }
-    out
+
+    // Timing-линии (вертикальная и горизонтальная через центр сетки):
+    if x == 6 || y == 6 {
+        return true;
+    }
+
+    false
 }
 
-/// Итератор по координатам (x,y) в порядке чтения данных QR v1.
-pub fn walk_pairs_v1() -> impl Iterator<Item = (usize, usize)> {
-    struct It { x: isize, up: bool, phase: u8, y: isize }
-    impl Iterator for It {
-        type Item = (usize, usize);
-        fn next(&mut self) -> Option<Self::Item> {
-            loop {
-                if self.x < 0 { return None; }
-                if self.x == 6 { self.x -= 1; continue; } // пропускаем timing column
+/// Маршрут обхода для выборки бит: пары колонок (x, x-1), справа налево,
+/// «змейкой» по y. Пару с x=6 пропускаем (это timing-колонка).
+///
+/// Возвращает порядок координат ВСЕХ модулей сетки; далее потребитель сам
+/// отфильтровывает служебные через [`is_function_v1`].
+pub fn walk_pairs_v1() -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(N1 * N1);
 
-                match self.phase {
-                    0 => { let (xx, yy) = (self.x as usize, self.y as usize); self.phase = 1; return Some((xx, yy)); }
-                    1 => { let (xx, yy) = ((self.x - 1) as usize, self.y as usize); self.phase = 2; return Some((xx, yy)); }
-                    _ => {
-                        if self.up {
-                            if self.y > 0 { self.y -= 1; self.phase = 0; }
-                            else { self.up = false; self.x -= 2; if self.x == 6 { self.x -= 1; } if self.x < 0 { return None; } self.phase = 0; }
-                        } else {
-                            if self.y < 20 { self.y += 1; self.phase = 0; }
-                            else { self.up = true; self.x -= 2; if self.x == 6 { self.x -= 1; } if self.x < 0 { return None; } self.phase = 0; }
-                        }
-                    }
+    let mut x: isize = (N1 as isize) - 1; // стартуем с x=20
+    let mut upward = true;                // первая пара — движение вверх
+
+    while x >= 0 {
+        // пропускаем timing-колонку (x=6) как пару
+        if x == 6 {
+            x -= 1;
+            if x < 0 { break; }
+        }
+
+        let xx = x as usize;
+
+        if upward {
+            for y in (0..N1).rev() {
+                out.push((xx, y));
+                if xx > 0 {
+                    out.push((xx - 1, y));
+                }
+            }
+        } else {
+            for y in 0..N1 {
+                out.push((xx, y));
+                if xx > 0 {
+                    out.push((xx - 1, y));
                 }
             }
         }
+
+        upward = !upward;
+        x -= 2; // к следующей паре колонок
     }
-    It { x: 20, up: true, phase: 0, y: 20 }
+
+    out
 }
 
-/// Служебные модули QR v1 (которые нельзя читать как данные).
-/// Включает: finder'ы + их белые сепараторы, timing row/col, обе копии format-инфо, dark module.
-pub fn is_function_v1(x: usize, y: usize) -> bool {
-    if x <= 7 && y <= 7 { return true; }            // TL (0..7,0..7)
-    if x >= 13 && y <= 7 { return true; }           // TR (13..20,0..7)
-    if x <= 7 && y >= 13 { return true; }           // BL (0..7,13..20)
-    if x == 6 || y == 6 { return true; }            // timing
-    if y == 8 && (x <= 8 || x >= 13) { return true; } // format (горизонталь)
-    if x == 8 && (y <= 8 || y >= 14) { return true; } // format (вертикаль, 13 — dark module)
-    if x == 8 && y == 13 { return true; }           // dark module
-    false
+/// Снять ровно 208 data-бит (без служебных) согласно маршруту [`walk_pairs_v1`].
+pub fn extract_data_bits_v1(grid: &[bool]) -> Vec<bool> {
+    debug_assert_eq!(grid.len(), N1 * N1);
+
+    let mut bits = Vec::with_capacity(208);
+    for (x, y) in walk_pairs_v1() {
+        if is_function_v1(x, y) {
+            continue;
+        }
+        bits.push(grid[y * N1 + x]);
+        if bits.len() == 208 {
+            break;
+        }
+    }
+    bits
 }
 
 #[cfg(test)]
@@ -61,22 +109,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn walk_pairs_basic_properties() {
-        let v: Vec<_> = walk_pairs_v1().collect();
-        assert!(v.len() <= 21*21);
-        assert_eq!(v[0], (20,20));
-        assert!(v.contains(&(0,0)));
+    fn function_mask_counts_v1() {
+        // количество служебных модулей (должно быть 233) и data-модулей (208)
+        let mut func = 0usize;
+        for y in 0..N1 {
+            for x in 0..N1 {
+                if is_function_v1(x, y) { func += 1; }
+            }
+        }
+        let data = N1 * N1 - func;
+        assert_eq!(func, 233, "function modules count");
+        assert_eq!(data, 208, "data modules count");
     }
 
     #[test]
-    fn function_mask_counts_v1() {
-        // Для v1 всего данных модулей = 26*8 = 208, значит служебных = 441-208 = 233.
-        let mut func = 0usize;
-        for y in 0..21 {
-            for x in 0..21 {
-                if is_function_v1(x,y) { func += 1; }
-            }
+    fn walk_pairs_basic_properties() {
+        let path = walk_pairs_v1();
+        // Размер должен покрывать всю сетку (каждый модуль один раз в последовательности)
+        assert_eq!(path.len(), N1 * N1 * 2 - 1, "последовательность пар векторизуется (каждый шаг пишет 2 координаты, кроме крайних границ)");
+        // Проверим, что x=6 как «пара» пропущен: в последовательности не
+        // встречаются соседние x=(6,5) или (6,7) как начало пары.
+        // (Сам модуль x=6 появится, но как часть соседних прямоугольников; этот
+        // тест скорее sanity, чем строгая спецификация.)
+        // Поищем первый элемент каждой «пары» (шаги по 2).
+        let mut saw_x6_as_first = false;
+        for (idx, (x, _y)) in path.iter().enumerate() {
+            if idx % 2 == 0 && *x == 6 { saw_x6_as_first = true; break; }
         }
-        assert_eq!(func, 441 - 208);
+        assert!(!saw_x6_as_first, "timing-колонка не должна быть первой в паре");
     }
 }

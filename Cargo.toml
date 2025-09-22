@@ -31,3 +31,6 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[dev-dependencies]
+criterion = "0.5"

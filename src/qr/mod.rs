@@ -1,19 +1,30 @@
-//! Модуль QR (v1): чтение двух копий 15-битного формат-инфо из матрицы,
-//! упаковка битов и выбор лучшего кандидата по расстоянию Хэмминга.
+//! Модуль QR (v1): формат-слово, извлечение data-битов и вспомогательные штуки.
 
 pub mod data;
 pub mod encode;
 pub mod format;
 pub mod rs;
+pub mod sample;
+pub mod bytes;
 
 use self::format::{decode_format_word, EcLevel, FORMAT_READ_PATHS_V1};
+
+/// Опции пайплайна QR (пока пустые; расширим при необходимости).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QrOptions;
+
+impl QrOptions {
+    #[inline]
+    pub fn default() -> Self {
+        Self
+    }
+}
 
 /// Преобразует u16 в массив из 15 булевых (MSB первым).
 #[allow(dead_code)]
 fn u16_to_15bits_msb_first(word: u16) -> [bool; 15] {
     let mut out = [false; 15];
     for i in 0..15 {
-        // Берём биты с позиций 14..0 (то есть 15 старших разрядов нашей «15-битной шины»)
         out[i] = ((word >> (14 - i)) & 1) != 0;
     }
     out
@@ -42,7 +53,51 @@ fn read_15_from_path(matrix: &[Vec<bool>], path: &[(usize, usize); 15]) -> u16 {
     pack_bits_msb(&acc)
 }
 
-/// Кандидат формата, найденный в одной из двух копий.
+/// Основная функция: читает две 15-битные дорожки формата и пытается декодировать.
+///
+/// Возвращает (EcLevel, mask_id, лучший_hamming_distance, индекс_дорожки_0_или_1).
+pub fn decode_v1_format_from_matrix(
+    matrix: &[Vec<bool>],
+) -> Option<(EcLevel, u8, u32, usize)> {
+    // Две стандартные дорожки чтения формат-слова (каждая — 15 координат).
+    let [path_a, path_b] = FORMAT_READ_PATHS_V1;
+
+    // Считываем сырые 15-битные слова.
+    let raw_a = read_15_from_path(matrix, &path_a);
+    let raw_b = read_15_from_path(matrix, &path_b);
+
+    // Каждое слово декодируем через BCH(15,5) и получаем кандидатов.
+    let mut candidates = Vec::with_capacity(2);
+
+    if let Some((ec, mask_id, dist)) = decode_format_word(raw_a) {
+        candidates.push(FormatCandidate {
+            ec,
+            mask_id,
+            distance: dist,
+            source_idx: 0,
+        });
+    }
+    if let Some((ec, mask_id, dist)) = decode_format_word(raw_b) {
+        candidates.push(FormatCandidate {
+            ec,
+            mask_id,
+            distance: dist,
+            source_idx: 1,
+        });
+    }
+
+    // Если кандидатов нет — вернуть None.
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Выбрать наилучший (минимальное расстояние Хэмминга).
+    candidates
+        .into_iter()
+        .min_by_key(|c| c.distance)
+        .map(|c| (c.ec, c.mask_id, c.distance, c.source_idx))
+}
+
 #[derive(Copy, Clone, Debug)]
 struct FormatCandidate {
     ec: EcLevel,
@@ -51,60 +106,16 @@ struct FormatCandidate {
     source_idx: usize, // 0 или 1 — из какой дорожки
 }
 
-/// Основная функция: читает две 15-битные дорожки формата и пытается декодировать.
-///
-/// Возвращает Some((уровень, id маски, расстояние, индекс источника))
-/// при успешном декодировании (расстояние ≤ 3), иначе None.
-pub fn decode_v1_format_from_matrix(matrix: &[Vec<bool>]) -> Option<(EcLevel, u8, u32, usize)> {
-    // На входе ожидаем матрицу не менее 21×21 (v1).
-    if matrix.len() < 21 || matrix[0].len() < 21 {
-        return None;
-    }
-
-    let [path_a, path_b] = FORMAT_READ_PATHS_V1;
-
-    let w_a = read_15_from_path(matrix, &path_a);
-    let w_b = read_15_from_path(matrix, &path_b);
-
-    let mut candidates: Vec<FormatCandidate> = Vec::new();
-
-    if let Some((ec, mask, d)) = decode_format_word(w_a) {
-        candidates.push(FormatCandidate {
-            ec,
-            mask_id: mask,
-            distance: d,
-            source_idx: 0,
-        });
-    }
-    if let Some((ec, mask, d)) = decode_format_word(w_b) {
-        candidates.push(FormatCandidate {
-            ec,
-            mask_id: mask,
-            distance: d,
-            source_idx: 1,
-        });
-    }
-
-    // Если обе копии валидны — выбираем с меньшим расстоянием.
-    candidates
-        .into_iter()
-        .min_by_key(|c| c.distance)
-        .map(|c| (c.ec, c.mask_id, c.distance, c.source_idx))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn u16_to_15bits_len_and_order() {
-        // MSB среди 15 бит — это разряд 14 (значение 1<<14 = 0x4000).
         let w: u16 = 1 << 14;
         let bits = u16_to_15bits_msb_first(w);
-        assert_eq!(bits.len(), 15);
         assert!(bits[0], "ожидался установленный старший бит (index 0)");
 
-        // LSB среди 15 бит — это разряд 0 (значение 1).
         let w2: u16 = 1;
         let bits2 = u16_to_15bits_msb_first(w2);
         assert!(bits2[14], "ожидался установленный младший бит (index 14)");
@@ -123,7 +134,6 @@ mod tests {
         assert_eq!(a.len(), 15);
         assert_eq!(b.len(), 15);
 
-        // И в пределах 21×21
         for &(x, y) in a.iter().chain(b.iter()) {
             assert!(x < 21 && y < 21, "({x},{y}) out of bounds");
         }

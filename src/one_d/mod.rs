@@ -8,6 +8,7 @@ pub enum BarcodeFormat {
     EAN13,
     UPCA,
     Code128,
+    QR,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

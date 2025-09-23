@@ -1,117 +1,64 @@
-use super::{find_finder_patterns, PointF, QrOptions};
-use crate::GrayImage;
+// src/qr/sample.rs
+//! Семплинг QR v1 (21×21) из изображения.
+//!
+//! Минимальная рабочая версия без поиска finder-паттернов:
+//! предполагаем, что QR занимает центральную квадратную область кадра,
+//! и равномерно дискретизируем её в сетку 21×21 ближайшим соседом.
+//!
+//! Когда будет подключён реальный поиск углов (finder/align), этот модуль
+//! можно заменить на перспективную выборку по гомографии.
 
-/// Сэмплирует сетку QR v1 (21×21) → Vec<bool> длиной 441 (row-major, true=чёрный).
-pub fn sample_qr_v1_grid(img: &GrayImage<'_>, opts: &QrOptions) -> Option<Vec<bool>> {
-    let pts = find_finder_patterns(img, opts);
-    if pts.len() != 3 { return None; }
-    let (tl, tr, bl) = classify_tl_tr_bl(&pts)?;
+use crate::prelude::GrayImage;
+use super::QrOptions;
 
-    let br = PointF { x: tr.x + bl.x - tl.x, y: tr.y + bl.y - tl.y };
+/// Сэмплинг сетки 21×21. Возвращает `Vec<bool>` длиной 441 (true = чёрный).
+///
+/// Условия успеха (временно, в ожидании полноценного finder’а):
+/// - картинка не пустая,
+/// - минимальный размер стороны >= 21,
+/// - QR приблизительно по центру и занимает существенную часть кадра.
+pub fn sample_qr_v1_grid(img: &GrayImage<'_>, _opts: &QrOptions) -> Option<Vec<bool>> {
+    let w = img.width as i32;
+    let h = img.height as i32;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
 
-    let n = 21.0f32;
-    let s_tl = PointF { x: 3.5, y: 3.5 };
-    let s_tr = PointF { x: n - 3.5, y: 3.5 };
-    let s_bl = PointF { x: 3.5, y: n - 3.5 };
-    let s_br = PointF { x: n - 3.5, y: n - 3.5 };
+    let side = w.min(h);
+    if side < 21 {
+        return None;
+    }
 
-    let h = homography_from_4([s_tl, s_tr, s_bl, s_br], [tl, tr, bl, br])?;
+    // Размер одного модуля в исходном изображении.
+    let module = side as f32 / 21.0;
 
-    let mut out = vec![false; 21*21];
-    for y in 0..21 {
-        for x in 0..21 {
-            let sx = x as f32 + 0.5;
-            let sy = y as f32 + 0.5;
-            let (px, py) = project(&h, sx, sy);
-            let ix = px.round() as isize;
-            let iy = py.round() as isize;
-            let v = if ix >= 0 && iy >= 0 && (ix as usize) < img.width && (iy as usize) < img.height {
-                img.get(ix as usize, iy as usize) < 128
-            } else {
-                false
-            };
-            out[y*21 + x] = v;
+    // Координаты левой-верхней точки центрального квадрата.
+    // Центрируем 21×21 квадрат внутри изображения.
+    let off_x = ((w - side) as f32) * 0.5;
+    let off_y = ((h - side) as f32) * 0.5;
+
+    let mut out = Vec::with_capacity(21 * 21);
+
+    for gy in 0..21 {
+        for gx in 0..21 {
+            // Берём центр модуля (gx+0.5, gy+0.5) в координатах сетки,
+            // переводим в координаты исходного изображения.
+            let fx = off_x + (gx as f32 + 0.5) * module;
+            let fy = off_y + (gy as f32 + 0.5) * module;
+
+            let ix = fx.round() as i32;
+            let iy = fy.round() as i32;
+
+            if ix < 0 || iy < 0 || ix >= w || iy >= h {
+                return None;
+            }
+
+            // Достаём яркость из GrayImage: img.data[row_major]
+            let v = img.data[(iy as usize) * (img.width) + (ix as usize)];
+            let is_black = v < 128;
+            out.push(is_black);
         }
     }
+
     Some(out)
-}
-
-fn classify_tl_tr_bl(pts: &[PointF]) -> Option<(PointF, PointF, PointF)> {
-    if pts.len() != 3 { return None; }
-    let p0 = pts[0]; let p1 = pts[1]; let p2 = pts[2];
-
-    let (tl, a, b) = {
-        let dot0 = dot(sub(p1,p0), sub(p2,p0)).abs();
-        let dot1 = dot(sub(p0,p1), sub(p2,p1)).abs();
-        let dot2 = dot(sub(p0,p2), sub(p1,p2)).abs();
-        if dot0 <= dot1 && dot0 <= dot2 { (p0, p1, p2) }
-        else if dot1 <= dot0 && dot1 <= dot2 { (p1, p0, p2) }
-        else { (p2, p0, p1) }
-    };
-
-    let (tr, bl) = if a.y <= b.y { (a, b) } else { (b, a) };
-    Some((tl, tr, bl))
-}
-
-#[inline] fn sub(a: PointF, b: PointF) -> PointF { PointF{ x: a.x - b.x, y: a.y - b.y } }
-#[inline] fn dot(a: PointF, b: PointF) -> f32 { a.x*b.x + a.y*b.y }
-
-fn homography_from_4(src: [PointF;4], dst: [PointF;4]) -> Option<[[f32;3];3]> {
-    let mut a = [[0f32;8];8];
-    let mut bvec = [0f32;8];
-    for k in 0..4 {
-        let (x, y) = (src[k].x, src[k].y);
-        let (xd, yd) = (dst[k].x, dst[k].y);
-        a[2*k][0] = x; a[2*k][1] = y; a[2*k][2] = 1.0;
-        a[2*k][3] = 0.0; a[2*k][4] = 0.0; a[2*k][5] = 0.0;
-        a[2*k][6] = -x*xd; a[2*k][7] = -y*xd;
-        bvec[2*k] = xd;
-
-        a[2*k+1][0] = 0.0; a[2*k+1][1] = 0.0; a[2*k+1][2] = 0.0;
-        a[2*k+1][3] = x; a[2*k+1][4] = y; a[2*k+1][5] = 1.0;
-        a[2*k+1][6] = -x*yd; a[2*k+1][7] = -y*yd;
-        bvec[2*k+1] = yd;
-    }
-    let h_vec = solve_8x8(a, bvec)?;
-    Some([
-        [h_vec[0], h_vec[1], h_vec[2]],
-        [h_vec[3], h_vec[4], h_vec[5]],
-        [h_vec[6], h_vec[7], 1.0    ],
-    ])
-}
-
-#[inline]
-fn project(h: &[[f32;3];3], x: f32, y: f32) -> (f32, f32) {
-    let nx = h[0][0]*x + h[0][1]*y + h[0][2];
-    let ny = h[1][0]*x + h[1][1]*y + h[1][2];
-    let d  = h[2][0]*x + h[2][1]*y + h[2][2];
-    if d.abs() < 1e-6 { return (nx, ny); }
-    (nx/d, ny/d)
-}
-
-fn solve_8x8(mut a: [[f32;8];8], mut b: [f32;8]) -> Option<[f32;8]> {
-    for i in 0..8 {
-        let mut piv = i;
-        let mut mx = a[i][i].abs();
-        for r in (i+1)..8 { let v = a[r][i].abs(); if v > mx { mx = v; piv = r; } }
-        if mx < 1e-8 { return None; }
-        if piv != i { a.swap(i, piv); b.swap(i, piv); }
-        let diag = a[i][i];
-        for j in i..8 { a[i][j] /= diag; }
-        b[i] /= diag;
-
-        for r in (i+1)..8 {
-            let factor = a[r][i];
-            if factor == 0.0 { continue; }
-            for j in i..8 { a[r][j] -= factor * a[i][j]; }
-            b[r] -= factor * b[i];
-        }
-    }
-    let mut x = [0f32;8];
-    for i in (0..8).rev() {
-        let mut s = b[i];
-        for j in (i+1)..8 { s -= a[i][j] * x[j]; }
-        x[i] = s;
-    }
-    Some(x)
 }

@@ -41,6 +41,7 @@ impl<'a> GrayImage<'a> {
             return &out[..];
         }
 
+        // простая скользящая
         let win = window.max(3).min(63) | 1;
         let r = win / 2;
 
@@ -53,6 +54,7 @@ impl<'a> GrayImage<'a> {
             let l = x.saturating_sub(r);
             let rr = (x + r + 1).min(w);
             if rr > win {
+                // скользящее окно
                 let outv = row[l.saturating_sub(1)] as i32;
                 let inv = row[rr - 1] as i32;
                 sum = (sum as i32 - outv + inv) as u32;
@@ -195,6 +197,19 @@ pub enum Symbology {
     Ean13,
 }
 
+/// Ошибки распознавания верхнего уровня.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DecodeError {
+    /// На изображении не найдено ни одного поддерживаемого кода.
+    NotFound,
+    /// Ошибка контрольной суммы.
+    ChecksumError,
+    /// Формат найден, но структура неверна/повреждена.
+    InvalidFormat,
+    /// Внутренняя ошибка декодера/параметров (зарезервировано).
+    Internal(String),
+}
+
 /// Дополнительная произвольная мета-информация о распознавании.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecodedExtras {
@@ -220,7 +235,7 @@ impl DecodedExtras {
 pub struct DecodedSymbol {
     pub symbology: Symbology,
     pub text: String,
-    pub confidence: f32,
+    pub confidence: f32, // 0..=1
     pub quad: Option<Quad>,
     pub orientation: Option<Orientation>,
     pub bytes: Option<Vec<u8>>,
@@ -270,8 +285,13 @@ impl DecodedSymbol {
 
 /// Утилиты для GrayImage с корректными lifetime.
 pub trait GrayImageExt {
+    /// Вернуть столбец `x` в буфер `buf` и отдать срез с тем же lifetime.
     fn col<'b>(&self, x: usize, buf: &'b mut Vec<u8>) -> &'b [u8];
+
+    /// Бинаризация строки `y` по скользящему среднему в окне `window`.
     fn threshold_row_mean<'b>(&self, y: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8];
+
+    /// Бинаризация столбца `x` по скользящему среднему в окне `window`.
     fn threshold_col_mean<'b>(&self, x: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8];
 }
 
@@ -280,10 +300,12 @@ impl<'a> GrayImageExt for GrayImage<'a> {
     fn col<'b>(&self, x: usize, buf: &'b mut Vec<u8>) -> &'b [u8] {
         self.col(x, buf)
     }
+
     #[inline]
     fn threshold_row_mean<'b>(&self, y: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8] {
         self.threshold_row_mean(y, window, out)
     }
+
     #[inline]
     fn threshold_col_mean<'b>(&self, x: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8] {
         self.threshold_col_mean(x, window, out)
@@ -295,10 +317,12 @@ impl LumaImageExt for LumaImage {
     fn col<'b>(&self, x: usize, buf: &'b mut Vec<u8>) -> &'b [u8] {
         self.col(x, buf)
     }
+
     #[inline]
     fn threshold_row_mean<'b>(&self, y: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8] {
         self.threshold_row_mean(y, window, out)
     }
+
     #[inline]
     fn threshold_col_mean<'b>(&self, x: usize, window: usize, out: &'b mut Vec<u8>) -> &'b [u8] {
         self.threshold_col_mean(x, window, out)

@@ -4,49 +4,43 @@
 
 use crate::api::Pipeline;
 use crate::one_d::{Barcode, BarcodeFormat, DecodeOptions};
-use crate::prelude::{DecodedSymbol, LumaImage, Symbology};
+use crate::prelude::{DecodedSymbol, GrayImage, LumaImage, Symbology};
 
-/// Старый вход: LumaImage + DecodeOptions → Vec<one_d::Barcode>.
-/// QR в старом enum отсутствует — такие результаты пропускаем
-/// (если нужно — добавь вариант QR в BarcodeFormat и разморозь маппинг ниже).
-pub fn decode_any(img: LumaImage<'_>, _opts: DecodeOptions) -> Vec<Barcode> {
+/// Старый вход из бинарников: GrayImage<'_> + DecodeOptions → Vec<one_d::Barcode>.
+/// Конвертируем GrayImage во «владельческий» LumaImage и запускаем новый пайплайн.
+/// QR в старом enum отсутствует — пропускаем (или добавь вариант в BarcodeFormat).
+pub fn decode_any(img: GrayImage<'_>, _opts: DecodeOptions) -> Vec<Barcode> {
     let pipeline = Pipeline::default();
 
-    // В новом API метод принимает ссылку.
-    let decoded: Vec<DecodedSymbol> = pipeline.decode_all(&img);
+    // Копия буфера: GrayImage<'_> → LumaImage
+    let owned: LumaImage = img.into();
 
+    // Новый API принимает &LumaImage и возвращает Vec<DecodedSymbol>.
+    let decoded: Vec<DecodedSymbol> = pipeline.decode_all(&owned);
+
+    // Маппим в старую структуру.
     let mut out = Vec::with_capacity(decoded.len());
     for s in decoded {
-        let fmt = match s.symbology {
+        let fmt_opt = match s.symbology {
             Symbology::Code128 => Some(BarcodeFormat::Code128),
             Symbology::Ean13 => Some(BarcodeFormat::EAN13),
-            Symbology::QR => None, // нет варианта в старом enum → пропускаем
+            Symbology::QR => None, // ← если добавишь QR в BarcodeFormat — сделай Some(BarcodeFormat::QR)
         };
 
-        if let Some(format) = fmt {
+        if let Some(format) = fmt_opt {
+            let row = s
+                .extras
+                .properties
+                .get("row")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+
             out.push(Barcode {
                 format,
                 text: s.text,
-                // В старой структуре `row` — это индекс строки (usize),
-                // заполним 0, так как у нас нет «сырого ряда» на этом слое.
-                row: 0,
+                row,
             });
         }
     }
     out
 }
-
-/*
-Чтобы вернуть и QR, добавь в src/one_d/mod.rs:
-
-pub enum BarcodeFormat {
-    Code128,
-    EAN13,
-    QR, // <— добавить
-}
-
-и здесь поменяй:
-    Symbology::QR => None
-на
-    Symbology::QR => Some(BarcodeFormat::QR)
-*/

@@ -1,31 +1,33 @@
 // src/qr/rs.rs
 //! Reed–Solomon для QR (GF(256), примитивный полином 0x11D).
-//! Полностью safe-реализация без таблиц. Есть кодирование (EC-байты)
-//! и ПОЛНАЯ коррекция ошибок: синдромы → Берлекэмп–Мэсси → Чиен → Форни.
+//! Полностью safe-реализация без таблиц.
+//!
+//! Соглашения:
+//! - Внутренние многочлены храним в массиве по ВОЗРАСТАНИЮ степени (p[i] == coef(x^i)).
+//! - Массив кодвордов `codewords` — high-degree-first (индекс 0 — старшая степень).
+//! - Для синдромов: S_k = C(α^k), C(x)=∑ c_i x^{n-1-i}.
 
-const GF_PRIM: u16 = 0x11D; // x^8 + x^4 + x^3 + x^2 + 1
-const GF_GEN: u8 = 2;       // α
+const GF_PRIM: u16 = 0x11D;              // x^8 + x^4 + x^3 + x^2 + 1
+const GF_REDUCE8: u16 = GF_PRIM ^ 0x100; // 0x1D — редукция по младшим 8 битам
+const GF_GEN: u8 = 2;                    // α
 
-#[inline]
-fn gf_add(a: u8, b: u8) -> u8 { a ^ b }
+#[inline] fn gf_add(a: u8, b: u8) -> u8 { a ^ b }
 
-/// Умножение в GF(256) с редукцией по 0x11D.
 #[inline]
 fn gf_mul(a: u8, b: u8) -> u8 {
     let mut aa = a as u16;
     let mut bb = b as u16;
-    let mut res: u8 = 0;
+    let mut r: u8 = 0;
     while bb != 0 {
-        if (bb & 1) != 0 { res ^= aa as u8; }
+        if (bb & 1) != 0 { r ^= aa as u8; }
         let carry = (aa & 0x80) != 0;
         aa = (aa << 1) & 0xFF;
-        if carry { aa ^= GF_PRIM; }
+        if carry { aa ^= GF_REDUCE8; }
         bb >>= 1;
     }
-    res
+    r
 }
 
-/// Быстрое возведение в степень: a^e (mod 255 по показателю).
 #[inline]
 fn gf_pow(a: u8, mut e: i32) -> u8 {
     if e == 0 { return 1; }
@@ -43,127 +45,40 @@ fn gf_pow(a: u8, mut e: i32) -> u8 {
     acc
 }
 
+#[inline] fn gf_inv(a: u8) -> u8 { debug_assert!(a != 0); gf_pow(a, 254) }
+
+// ---------------- poly helpers (ascending-degree representation) ----------------
+
 #[inline]
-fn gf_inv(a: u8) -> u8 {
-    debug_assert!(a != 0);
-    gf_pow(a, 254)
+fn trim_high_zeros(v: &mut Vec<u8>) {
+    while v.len() > 1 && *v.last().unwrap() == 0 { v.pop(); }
 }
 
-/// Генераторный полином g(x) степени ec_len.
-/// Возвращаем **ровно ec_len младших коэффициентов**: g0..g_{ec_len-1},
-/// без старшего коэффициента при x^{ec_len} (он всегда 1).
-fn generator_poly(ec_len: usize) -> Vec<u8> {
-    // g(x) = ∏_{i=0..ec_len-1} (x - α^{i})
-    let mut g = vec![1u8]; // степень 0
-    for i in 0..ec_len {
-        let a = gf_pow(GF_GEN, i as i32);
-        let mut ng = vec![0u8; g.len() + 1];
-        for (j, &gj) in g.iter().enumerate() {
-            // (x - a) = (x + a) в GF(2)
-            ng[j]     = gf_add(ng[j], gf_mul(gj, a)); // коэффициент при x^j
-            ng[j + 1] = gf_add(ng[j + 1], gj);        // коэффициент при x^{j+1}
-        }
-        g = ng;
-    }
-    // g сейчас длины ec_len+1. Вернём нижние ec_len коэффициентов (g0..g_{ec_len-1}).
-    g.truncate(ec_len);
-    g
-}
-
-/// Вернуть `ec_len` байт ECC для `data`. Систематический код.
-pub fn rs_ec_bytes(data: &[u8], ec_len: usize) -> Vec<u8> {
-    let gen = generator_poly(ec_len); // длина = ec_len
-    let mut rem = vec![0u8; ec_len];
-    for &d in data {
-        let coef = gf_add(d, rem[0]);
-        // сдвиг остатков влево
-        for i in 0..ec_len.saturating_sub(1) {
-            rem[i] = rem[i + 1];
-        }
-        if ec_len > 0 { rem[ec_len - 1] = 0; }
-        if coef != 0 {
-            // умножаем coef * g0..g_{ec_len-1}
-            for i in 0..ec_len {
-                rem[i] = gf_add(rem[i], gf_mul(coef, gen[i]));
-            }
-        }
-    }
-    rem
-}
-
-/// Попытаться ИСПРАВИТЬ ошибки в одном RS-блоке длиной `data_len + ec_len`.
-/// Возвращает Ok(количество_исправленных_байт) или Err(()).
-pub fn rs_correct_codeword_block(codewords: &mut [u8], data_len: usize, ec_len: usize) -> Result<usize, ()> {
-    let n = data_len + ec_len;
-    if codewords.len() != n || ec_len == 0 { return Err(()); }
-
-    // 1) Синдромы
-    let synd = compute_syndromes(codewords, ec_len);
-    if synd.iter().all(|&s| s == 0) { return Ok(0); }
-
-    // 2) Берлекэмп–Мэсси → σ(x), ω(x)
-    let (sigma, omega) = berlekamp_massey(&synd);
-
-    // 3) Чиен → позиции ошибок
-    let err_pos = chien_search(&sigma, n);
-    if err_pos.is_empty() { return Err(()); }
-    if err_pos.len() > ec_len { return Err(()); }
-
-    // 4) Форни → величины ошибок и исправление
-    let mut corrected = 0usize;
-    for &pos in &err_pos {
-        // x = α^(255 - pos)
-        let x = gf_pow(GF_GEN, (255 - pos as i32) % 255);
-        let err_mag = forney_error_magnitude(&omega, &sigma, x);
-        let idx = n - 1 - pos; // позиция от конца
-        let before = codewords[idx];
-        codewords[idx] = gf_add(codewords[idx], err_mag);
-        if codewords[idx] != before { corrected += 1; }
-    }
-
-    // 5) Проверка
-    let post = compute_syndromes(codewords, ec_len);
-    if post.iter().any(|&s| s != 0) { return Err(()); }
-
-    Ok(corrected)
-}
-
-// ---------------- внутренние функции ----------------
-
-fn compute_syndromes(codewords: &[u8], ec_len: usize) -> Vec<u8> {
-    // S_k = C(α^k), k=0..ec_len-1
-    let n = codewords.len();
-    let mut synd = vec![0u8; ec_len];
-    for k in 0..ec_len {
-        let a_k = gf_pow(GF_GEN, k as i32);
-        let mut acc = 0u8;
-        for i in 0..n {
-            let pow = gf_pow(a_k, (n - 1 - i) as i32);
-            acc = gf_add(acc, gf_mul(codewords[i], pow));
-        }
-        synd[k] = acc;
-    }
-    synd
-}
-
-fn poly_scale(p: &[u8], s: u8) -> Vec<u8> {
-    if s == 0 { return vec![0]; }
-    p.iter().map(|&c| gf_mul(c, s)).collect()
-}
-
+#[inline]
 fn poly_add(a: &[u8], b: &[u8]) -> Vec<u8> {
     let n = a.len().max(b.len());
     let mut out = vec![0u8; n];
     for i in 0..n {
-        let ai = if i + a.len() >= n { a[i + a.len() - n] } else { 0 };
-        let bi = if i + b.len() >= n { b[i + b.len() - n] } else { 0 };
+        let ai = if i < a.len() { a[i] } else { 0 };
+        let bi = if i < b.len() { b[i] } else { 0 };
         out[i] = gf_add(ai, bi);
     }
-    trim_leading_zeros(&mut out);
+    trim_high_zeros(&mut out);
     out
 }
 
+#[inline]
+fn poly_scale(p: &[u8], s: u8) -> Vec<u8> {
+    if s == 0 { return vec![0]; }
+    let mut out: Vec<u8> = p.iter().map(|&c| gf_mul(c, s)).collect();
+    trim_high_zeros(&mut out);
+    out
+}
+
+#[inline]
 fn poly_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
+    if a.len() == 1 && a[0] == 0 { return vec![0]; }
+    if b.len() == 1 && b[0] == 0 { return vec![0]; }
     let mut out = vec![0u8; a.len() + b.len() - 1];
     for (i, &ai) in a.iter().enumerate() {
         if ai == 0 { continue; }
@@ -172,49 +87,174 @@ fn poly_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
             out[i + j] = gf_add(out[i + j], gf_mul(ai, bj));
         }
     }
-    trim_leading_zeros(&mut out);
+    trim_high_zeros(&mut out);
     out
 }
 
+#[inline]
+fn poly_shift_x(p: &[u8], m: usize) -> Vec<u8> {
+    if p.len() == 1 && p[0] == 0 { return vec![0]; }
+    let mut out = vec![0u8; m];
+    out.extend_from_slice(p);
+    out
+}
+
+#[inline]
+fn poly_eval(p: &[u8], x: u8) -> u8 {
+    // Horner по ВОЗРАСТАНИЮ степени: идём от старшей к младшей (с конца к началу).
+    let mut y = 0u8;
+    for &coef in p.iter().rev() {
+        y = gf_mul(y, x);
+        y = gf_add(y, coef);
+    }
+    y
+}
+
+#[inline]
 fn poly_derivative(p: &[u8]) -> Vec<u8> {
+    // d/dx x^k = k*x^{k-1}; в GF(2) остаются только нечётные k.
     if p.len() <= 1 { return vec![0]; }
     let mut out = Vec::with_capacity(p.len() - 1);
-    let deg = p.len() - 1;
-    for i in 0..deg {
-        let coef = p[i];
-        let power = deg - i;
-        if power % 2 == 1 { out.push(coef); }
+    for k in 1..p.len() {
+        if (k & 1) == 1 { out.push(p[k]); } else { out.push(0); }
     }
-    trim_leading_zeros(&mut out);
+    trim_high_zeros(&mut out);
     out
 }
 
-fn trim_leading_zeros(v: &mut Vec<u8>) {
-    while v.len() > 1 && v[0] == 0 { v.remove(0); }
+// ---------------- generator (narrow-sense) ----------------
+
+/// Генераторный полином степени `ec_len` (корни α^1..α^{ec_len}).
+/// Возвращаем ровно `ec_len` младших коэффициентов (без старшей 1 при x^{ec_len}).
+fn generator_poly(ec_len: usize) -> Vec<u8> {
+    let mut g = vec![1u8]; // степень 0
+    for i in 0..ec_len {
+        let a = gf_pow(GF_GEN, (i as i32) + 1);
+        // (x - a) = a + x в GF(2)
+        let factor = vec![a, 1u8]; // a + x
+        g = poly_mul(&g, &factor);
+    }
+    // g длиной ec_len+1, отбрасываем старшую 1
+    let mut res = g;
+    res.pop();
+    trim_high_zeros(&mut res);
+    res // длина == ec_len, коэффициенты при x^0..x^{ec_len-1}
 }
 
+// ---------------- public API ----------------
+
+/// ECC для `data` (систематический RS). Возвращаем блок длиной `ec_len`,
+/// который просто дописывается в конец `data` (high-degree-first порядок).
+pub fn rs_ec_bytes(data: &[u8], ec_len: usize) -> Vec<u8> {
+    if ec_len == 0 { return vec![]; }
+
+    // g_full(x) = g0 + ... + g_{ec-1} x^{ec-1} + 1·x^{ec}  (ascending)
+    let mut g_full = generator_poly(ec_len);
+    g_full.push(1);
+
+    // Переводим в «старшая→младшая» для прямого деления:
+    let mut g_rev = g_full.clone();
+    g_rev.reverse();
+
+    // M(x)·x^{ec} в high-degree-first: data + ec нулей справа.
+    let mut rem: Vec<u8> = Vec::with_capacity(data.len() + ec_len);
+    rem.extend_from_slice(data);
+    rem.resize(data.len() + ec_len, 0);
+
+    // Деление слева→вправо.
+    for i in 0..data.len() {
+        let coef = rem[i];
+        if coef != 0 {
+            for j in 0..=ec_len {
+                rem[i + j] = gf_add(rem[i + j], gf_mul(coef, g_rev[j]));
+            }
+        }
+    }
+
+    // Остаток — последние ec_len байт.
+    rem[data.len()..data.len() + ec_len].to_vec()
+}
+
+/// Исправить ошибки в одном RS-блоке длиной `data_len + ec_len`.
+pub fn rs_correct_codeword_block(codewords: &mut [u8], data_len: usize, ec_len: usize) -> Result<usize, ()> {
+    let n = data_len + ec_len;
+    if codewords.len() != n || ec_len == 0 { return Err(()); }
+
+    // 1) синдромы
+    let synd = compute_syndromes(codewords, ec_len);
+    if synd.iter().all(|&s| s == 0) { return Ok(0); }
+
+    // 2) Берлекэмп–Мэсси → σ, ω
+    let (sigma, omega) = berlekamp_massey(&synd);
+
+    // 3) Чиен: ищем ПРАВЫЕ индексы i (0 — правый край), где σ(α^{-i}) = 0.
+    //    Для записи в массив байт используем левый индекс j = n-1-i.
+    let err_pos = chien_search_right_index(&sigma, n);
+    if err_pos.is_empty() || err_pos.len() > ec_len { return Err(()); }
+
+    // 4) Форни: X = α^{i}, используем X^{-1}; правый i → левый j = n-1-i.
+    let sigma_der = poly_derivative(&sigma);
+    let mut corrected = 0usize;
+    for &i_right in &err_pos {
+        let j_left = n - 1 - i_right;
+        let x = gf_pow(GF_GEN, i_right as i32);
+        let x_inv = gf_inv(x);
+        let num = poly_eval(&omega, x_inv);
+        let den = poly_eval(&sigma_der, x_inv);
+        if den == 0 { return Err(()); }
+        let e = gf_mul(num, gf_inv(den));
+        let before = codewords[j_left];
+        codewords[j_left] = gf_add(codewords[j_left], e);
+        if codewords[j_left] != before { corrected += 1; }
+    }
+
+    // 5) проверка
+    let post = compute_syndromes(codewords, ec_len);
+    if post.iter().any(|&s| s != 0) { return Err(()); }
+
+    Ok(corrected)
+}
+
+// ---------------- internal: syndromes, BM, Chien ----------------
+
+/// Синдромы S_k = C(α^k), k=1..=ec_len. C(x)=∑ c_i x^{n-1-i}.
+fn compute_syndromes(codewords: &[u8], ec_len: usize) -> Vec<u8> {
+    let n = codewords.len();
+    let mut synd = vec![0u8; ec_len];
+    for k in 1..=ec_len {
+        let a_k = gf_pow(GF_GEN, k as i32);
+        let mut acc = 0u8;
+        for i in 0..n {
+            let pow = gf_pow(a_k, (n - 1 - i) as i32);
+            acc = gf_add(acc, gf_mul(codewords[i], pow));
+        }
+        synd[k - 1] = acc;
+    }
+    synd
+}
+
+/// Берлекэмп–Мэсси. Возвращает (σ(x), ω(x)) в ascending-представлении.
+/// σ[0] = 1. ω = (σ * S) mod x^L, где S = S1 + S2 x + ... (ascending).
 fn berlekamp_massey(synd: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    // Возвращает (σ(x), ω(x)).
-    let mut c = vec![1u8];
+    let mut sigma = vec![1u8];
     let mut b = vec![1u8];
-    let mut l = 0i32;
-    let mut m = 1i32;
+    let mut l: usize = 0;
+    let mut m: usize = 1;
 
     for n in 0..synd.len() {
-        // δ = S_n + sum_{i=1..L} c_i * S_{n-i}
+        // δ = S_n + sum_{i=1..L} σ_i * S_{n-i}
         let mut delta = synd[n];
-        for i in 1..=l as usize {
-            delta = gf_add(delta, gf_mul(c[i], synd[n - i]));
+        for i in 1..=l {
+            if i < sigma.len() {
+                delta = gf_add(delta, gf_mul(sigma[i], synd[n - i]));
+            }
         }
-
         if delta != 0 {
-            let t = c.clone();
-            let mult = poly_scale(&b, delta);
-            let mut x_m_mult = vec![0u8; m as usize];
-            x_m_mult.extend_from_slice(&mult);
-            c = poly_add(&c, &x_m_mult);
-            if 2 * l as usize <= n {
-                l = (n + 1 - l as usize) as i32;
+            let t = sigma.clone();
+            let upd = poly_shift_x(&poly_scale(&b, delta), m);
+            sigma = poly_add(&sigma, &upd);
+            if 2 * l <= n {
+                l = n + 1 - l;
                 b = poly_scale(&t, gf_inv(delta));
                 m = 1;
             } else {
@@ -225,45 +265,26 @@ fn berlekamp_massey(synd: &[u8]) -> (Vec<u8>, Vec<u8>) {
         }
     }
 
-    // ω(x) = c(x) * S(x) mod x^{L}
-    let s_poly = synd.to_vec();
-    let mut omega = poly_mul(&c, &s_poly);
-    if omega.len() > l as usize {
-        omega = omega[omega.len() - l as usize..].to_vec();
-    }
-    trim_leading_zeros(&mut omega);
+    // ω(x) = (σ(x) * S(x)) mod x^L
+    let s_poly = synd.to_vec(); // ascending: S1 + S2 x + ...
+    let mut omega = poly_mul(&sigma, &s_poly);
+    omega.truncate(l);          // mod x^L
+    trim_high_zeros(&mut omega);
 
-    (c, omega)
+    (sigma, omega)
 }
 
-fn chien_search(sigma: &[u8], n: usize) -> Vec<usize> {
-    // Ищем j, где σ(α^{-j})=0. Позиции считаем 0..n-1 от конца.
-    let mut err_pos = Vec::new();
-    for j in 0..n {
-        let x_inv = gf_pow(GF_GEN, (j as i32) % 255);
-        let x = gf_inv(x_inv);
-        if poly_eval(sigma, x) == 0 { err_pos.push(j); }
+/// Чиен: возвращает ПРАВОсторонние индексы i (0 — правый край), где σ(α^{-i}) = 0.
+/// Для массива байт потом берём j = n-1-i.
+fn chien_search_right_index(sigma: &[u8], n: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        let x_inv = gf_pow(GF_GEN, -(i as i32)); // α^{-i}
+        if poly_eval(sigma, x_inv) == 0 {
+            out.push(i);
+        }
     }
-    err_pos
-}
-
-fn poly_eval(p: &[u8], x: u8) -> u8 {
-    let mut y = 0u8;
-    for &coef in p {
-        y = gf_mul(y, x);
-        y = gf_add(y, coef);
-    }
-    y
-}
-
-fn forney_error_magnitude(omega: &[u8], sigma: &[u8], x: u8) -> u8 {
-    // e = -Ω(x^{-1}) / σ'(x^{-1})
-    let x_inv = gf_inv(x);
-    let num = poly_eval(omega, x_inv);
-    let den_poly = poly_derivative(sigma);
-    let den = poly_eval(&den_poly, x_inv);
-    if den == 0 { return 0; }
-    gf_mul(num, gf_inv(den))
+    out
 }
 
 // ---------------- tests ----------------
@@ -287,7 +308,7 @@ mod tests {
         let ec = rs_ec_bytes(&cw[..19], 7);
         cw[19..].copy_from_slice(&ec);
 
-        // Одиночная ошибка
+        // одиночная ошибка
         cw[3] ^= 0x5A;
 
         let mut work = cw.clone();

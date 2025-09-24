@@ -1,7 +1,7 @@
 //! Полный синтез QR v1-L (Byte mode) в изображение: finders, timing, format, данные, маска.
 
 use super::data::{is_function_v1, walk_pairs_v1};
-use super::format::EcLevel;
+use super::format::{EcLevel, FORMAT_READ_PATHS_V1};
 use super::rs::rs_ec_bytes;
 use crate::GrayImage;
 
@@ -128,60 +128,28 @@ pub fn synthesize_qr_v1_from_text(text: &str, mask_id: u8, unit: usize) -> GrayI
     draw_finder(&mut grid, 0, 14);
 
     // Timing row/col (везде, где это не finder/separator)
-    for x in 0..21 {
-        if x == 6 {
-            continue;
-        }
-        if (0..=7).contains(&x) || (13..=20).contains(&x) { /* попадёт на сепараторы/формат — ок */
-        }
-        grid[6 * 21 + x] = (x % 2) == 0;
-    }
-    for y in 0..21 {
-        if y == 6 {
-            continue;
-        }
-        grid[y * 21 + 6] = (y % 2) == 0;
+    for i in 8..=12 {
+        grid[6 * 21 + i] = (i % 2) == 0; // horizontal
+        grid[i * 21 + 6] = (i % 2) == 0; // vertical
     }
 
     // Dark module
     grid[13 * 21 + 8] = true;
 
-    // Format info (две копии), EC=L + mask_id
-    let fmt = encode_format_bits(EcLevel::L, mask_id);
-    // Copy A: y=8, x=0..=8 (кроме 6); x=8, y=8..=0 (кроме 8 и 6)
-    {
-        let mut bits15 = fmt;
-        let mut put = |x: usize, y: usize| {
-            let b = ((bits15 >> 14) & 1) != 0;
-            grid[y * 21 + x] = b;
-            bits15 <<= 1;
-        };
-        for x in 0..=8 {
-            if x != 6 {
-                put(x, 8);
-            }
-        }
-        for y in (0..=8).rev() {
-            if y != 8 && y != 6 {
-                put(8, y);
-            }
-        }
+    // Format info (две копии), EC=L + mask_id.
+    // **ИСПРАВЛЕНИЕ**: Записываем биты в те же места, откуда их читает декодер.
+    let fmt_bits = encode_format_bits(EcLevel::L, mask_id);
+    for i in 0..15 {
+        let bit = ((fmt_bits >> (14 - i)) & 1) != 0;
+        let (x1, y1) = FORMAT_READ_PATHS_V1[0][i];
+        let (x2, y2) = FORMAT_READ_PATHS_V1[1][i];
+        grid[y1 * 21 + x1] = bit;
+        grid[y2 * 21 + x2] = bit;
     }
-    // Copy B: y=8, x=20..=13; x=8, y=20..=14
-    {
-        let mut bits15 = fmt;
-        let mut put = |x: usize, y: usize| {
-            let b = ((bits15 >> 14) & 1) != 0;
-            grid[y * 21 + x] = b;
-            bits15 <<= 1;
-        };
-        for x in (13..=20).rev() {
-            put(x, 8);
-        }
-        for y in (14..=20).rev() {
-            put(8, y);
-        }
-    }
+    // Вторая копия также затрагивает (8, 13..20), поэтому нужно обработать
+    // и эту часть. Стандарт требует, чтобы обе копии были идентичны.
+    let (x_dark, y_dark) = (8, 13);
+    grid[y_dark * 21 + x_dark] = true; // Re-draw dark module as it's part of format info area.
 
     // 4) Размещение данных по «змейке» с применением маски только для data-модулей.
     let mut bit_iter = all_cw

@@ -1,22 +1,27 @@
+
 //! Модуль QR (v1): формат-слово, извлечение data-битов и вспомогательные штуки.
 
+pub mod bytes;
 pub mod data;
 pub mod encode;
+pub mod finder;
 pub mod format;
 pub mod rs;
 pub mod sample;
-pub mod bytes;
 
 use self::format::{decode_format_word, EcLevel, FORMAT_READ_PATHS_V1};
 
-/// Опции пайплайна QR (пока пустые; расширим при необходимости).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct QrOptions;
+/// Опции пайплайна QR.
+#[derive(Clone, Copy, Debug)]
+pub struct QrOptions {
+    /// Количество линий для сканирования при поиске finder patterns.
+    pub scan_lines: usize,
+}
 
-impl QrOptions {
+impl Default for QrOptions {
     #[inline]
-    pub fn default() -> Self {
-        Self
+    fn default() -> Self {
+        Self { scan_lines: 64 }
     }
 }
 

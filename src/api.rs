@@ -4,12 +4,12 @@
 // Поддержка 1D (EAN-13/UPC-A, Code128) и e2e для QR v1 (L/M/Q/H)
 // с ПОЛНОЙ коррекцией RS ECC (одноблочной для v1).
 
-use crate::prelude::*;
 use crate::one_d;
 use crate::one_d::DecodeOptions;
+use crate::prelude::*;
 
 // QR-конвейер использует подмодули внутри `qr`
-use crate::qr::{self, bytes, data, format, rs, sample, QrOptions};
+use crate::qr::{self, bytes, data, finder, format, rs, sample, QrOptions};
 
 /// Опции пайплайна (задаются через Builder).
 #[derive(Clone, Debug)]
@@ -171,10 +171,20 @@ impl Pipeline {
     }
 
     /// QR v1: пробуем уровни EC (L/M/Q/H), с белым списком и КОРРЕКЦИЕЙ RS.
-    fn try_decode_qr_v1_all_levels_with_correction(&self, img: &LumaImage) -> Option<DecodedSymbol> {
-        // Семплинг сетки 21×21 (flatten: Vec<bool> длиной 441).
+    fn try_decode_qr_v1_all_levels_with_correction(
+        &self,
+        img: &LumaImage,
+    ) -> Option<DecodedSymbol> {
         let qr_opts = QrOptions::default();
-        let grid: Vec<bool> = sample::sample_qr_v1_grid(&img.as_gray(), &qr_opts)?;
+
+        // 1. Ищем finder patterns
+        let finders = finder::find_finder_patterns(&img.as_gray(), &qr_opts);
+        if finders.len() < 3 {
+            return None;
+        }
+
+        // 2. Семплинг сетки 21×21 (flatten: Vec<bool> длиной 441).
+        let grid: Vec<bool> = sample::sample_qr_v1_grid(&img.as_gray(), &qr_opts, &finders)?;
 
         if grid.len() != 21 * 21 {
             return None;
@@ -194,7 +204,10 @@ impl Pipeline {
 
         // Белый список уровней EC (если непустой).
         if !self.opts.qr_allowed_ec_levels.is_empty()
-            && !self.opts.qr_allowed_ec_levels.iter().any(|&v| v == ec_level)
+            && !self.opts
+                .qr_allowed_ec_levels
+                .iter()
+                .any(|&v| v == ec_level)
         {
             return None;
         }
@@ -243,8 +256,9 @@ impl Pipeline {
         match rs::rs_correct_codeword_block(&mut cw[..], data_len, ec_len) {
             Ok(ncorr) => {
                 corrected_bytes = ncorr;
-                extras = extras.with("qr.rs_corrected", "true")
-                               .with("qr.rs_corrected_bytes", ncorr.to_string());
+                extras = extras
+                    .with("qr.rs_corrected", "true")
+                    .with("qr.rs_corrected_bytes", ncorr.to_string());
             }
             Err(_) => {
                 extras = extras.with("qr.rs_corrected", "false");
@@ -265,12 +279,16 @@ impl Pipeline {
         // Уверенность: базовая 0.80, +0.10 если RS сошёлся изначально, +0.05 если коррекция что-то исправила.
         let mut confidence = 0.80f32;
         if let Some(v) = extras.properties.get("qr.rs_match") {
-            if v == "true" { confidence += 0.10; }
+            if v == "true" {
+                confidence += 0.10;
+            }
         }
         if corrected_bytes > 0 {
             confidence += 0.05;
         }
-        if confidence > 0.99 { confidence = 0.99; }
+        if confidence > 0.99 {
+            confidence = 0.99;
+        }
 
         Some(
             DecodedSymbol::new(Symbology::QR, text)

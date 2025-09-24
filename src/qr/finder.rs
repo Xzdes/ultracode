@@ -1,12 +1,27 @@
+//! Поиск Finder Patterns (угловых "глаз") QR-кода.
+//!
+//! Алгоритм:
+//! 1. Сканирует изображение по горизонтали и вертикали.
+//! 2. На каждой линии ищет последовательности чёрных/белых полос
+//!    с соотношением ширин примерно 1:1:3:1:1.
+//! 3. Собирает кандидатов из центра таких последовательностей.
+//! 4. Кластеризует кандидатов для нахождения точных центров трёх "глаз".
+
 use crate::binarize::{binarize_row_adaptive, runs};
-use crate::GrayImage;
+use crate::prelude::GrayImage;
 use super::QrOptions;
 
-#[derive(Clone, Copy, Debug)]
-pub struct PointF { pub x: f32, pub y: f32 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointF {
+    pub x: f32,
+    pub y: f32,
+}
 impl PointF {
-    #[inline] pub fn dist2(self, other: PointF) -> f32 {
-        let dx = self.x - other.x; let dy = self.y - other.y; dx*dx + dy*dy
+    #[inline]
+    pub fn dist2(self, other: PointF) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        dx * dx + dy * dy
     }
 }
 
@@ -26,24 +41,38 @@ pub fn find_finder_patterns(img: &GrayImage<'_>, opts: &QrOptions) -> Vec<PointF
         // Префиксные суммы для координаты x
         let mut pref = Vec::with_capacity(rl.len() + 1);
         pref.push(0usize);
-        for &w in &rl { pref.push(pref.last().unwrap() + w); }
+        for &w in &rl {
+            pref.push(pref.last().unwrap() + w);
+        }
 
         // Цвета run'ов (true=чёрный)
         let starts_black = rb.first().copied().unwrap_or(false);
         let color_at = |idx: usize| -> bool {
-            if starts_black { idx % 2 == 0 } else { idx % 2 == 1 }
+            if starts_black {
+                idx % 2 == 0
+            } else {
+                idx % 2 == 1
+            }
         };
 
         for r0 in 0..rl.len().saturating_sub(4) {
             // Требуем B-W-B-W-B
-            if !color_at(r0) || color_at(r0+1) || !color_at(r0+2) || color_at(r0+3) || !color_at(r0+4) {
+            if !color_at(r0)
+                || color_at(r0 + 1)
+                || !color_at(r0 + 2)
+                || color_at(r0 + 3)
+                || !color_at(r0 + 4)
+            {
                 continue;
             }
-            let win = [rl[r0], rl[r0+1], rl[r0+2], rl[r0+3], rl[r0+4]];
+            let win = [rl[r0], rl[r0 + 1], rl[r0 + 2], rl[r0 + 3], rl[r0 + 4]];
             if is_finder_ratio(&win) {
                 let x0 = pref[r0];
-                let x_center = (x0 + win[0] + win[1] + win[2]/2) as f32;
-                cands.push(PointF { x: x_center, y: y as f32 });
+                let x_center = (x0 + win[0] + win[1] + win[2] / 2) as f32;
+                cands.push(PointF {
+                    x: x_center,
+                    y: y as f32,
+                });
             }
         }
     }
@@ -55,35 +84,53 @@ pub fn find_finder_patterns(img: &GrayImage<'_>, opts: &QrOptions) -> Vec<PointF
 
         // Собираем столбец
         let mut col: Vec<u8> = Vec::with_capacity(img.height);
-        for y in 0..img.height { col.push(img.get(x, y)); }
+        for y_coord in 0..img.height {
+            col.push(img.data[y_coord * img.width + x]);
+        }
         let rb = binarize_row_adaptive(&col);
         let rl = runs(&rb);
 
         // Префиксы для координаты y
         let mut pref = Vec::with_capacity(rl.len() + 1);
         pref.push(0usize);
-        for &w in &rl { pref.push(pref.last().unwrap() + w); }
+        for &w in &rl {
+            pref.push(pref.last().unwrap() + w);
+        }
 
         let starts_black = rb.first().copied().unwrap_or(false);
         let color_at = |idx: usize| -> bool {
-            if starts_black { idx % 2 == 0 } else { idx % 2 == 1 }
+            if starts_black {
+                idx % 2 == 0
+            } else {
+                idx % 2 == 1
+            }
         };
 
         for r0 in 0..rl.len().saturating_sub(4) {
-            if !color_at(r0) || color_at(r0+1) || !color_at(r0+2) || color_at(r0+3) || !color_at(r0+4) {
+            if !color_at(r0)
+                || color_at(r0 + 1)
+                || !color_at(r0 + 2)
+                || color_at(r0 + 3)
+                || !color_at(r0 + 4)
+            {
                 continue;
             }
-            let win = [rl[r0], rl[r0+1], rl[r0+2], rl[r0+3], rl[r0+4]];
+            let win = [rl[r0], rl[r0 + 1], rl[r0 + 2], rl[r0 + 3], rl[r0 + 4]];
             if is_finder_ratio(&win) {
                 let y0 = pref[r0];
-                let y_center = (y0 + win[0] + win[1] + win[2]/2) as f32;
-                cands.push(PointF { x: x as f32, y: y_center });
+                let y_center = (y0 + win[0] + win[1] + win[2] / 2) as f32;
+                cands.push(PointF {
+                    x: x as f32,
+                    y: y_center,
+                });
             }
         }
     }
 
     // --- Простейшая кластеризация кандидатов по расстоянию ---
-    if cands.is_empty() { return Vec::new(); }
+    if cands.is_empty() {
+        return Vec::new();
+    }
 
     let mut clusters: Vec<(PointF, usize)> = Vec::new(); // (center, count)
     let dist_thr = (img.width.min(img.height) as f32) / 20.0; // ~5% размера
@@ -113,14 +160,16 @@ pub fn find_finder_patterns(img: &GrayImage<'_>, opts: &QrOptions) -> Vec<PointF
 }
 
 /// Проверка окна из 5 run'ов на соотношение 1:1:3:1:1.
-fn is_finder_ratio(win: &[usize;5]) -> bool {
+fn is_finder_ratio(win: &[usize; 5]) -> bool {
     let sum: usize = win.iter().sum();
-    if sum == 0 { return false; }
+    if sum == 0 {
+        return false;
+    }
     let m = sum as f32 / 7.0; // один модуль в пикселях
     let exp = [1.0, 1.0, 3.0, 1.0, 1.0];
     let mut err = 0.0f32;
     for i in 0..5 {
-        err += ((win[i] as f32) - exp[i]*m).abs() / m;
+        err += ((win[i] as f32) - exp[i] * m).abs() / m;
     }
     err <= 1.6 // допускаем суммарное отклонение ~1.6 модуля на окно
 }
@@ -137,9 +186,9 @@ pub fn synthesize_qr_v1_skeleton(unit: usize) -> GrayImage<'static> {
 
 fn synthesize_qr_internal(unit: usize, with_timing: bool) -> GrayImage<'static> {
     assert!(unit >= 1);
-    let n = 21usize;   // версия 1
-    let qz = 4usize;   // quiet zone
-    let total = n + 2*qz;
+    let n = 21usize; // версия 1
+    let qz = 4usize; // quiet zone
+    let total = n + 2 * qz;
 
     // Матрица модулей (true=чёрный, false=белый)
     let mut mods = vec![false; total * total];
@@ -150,7 +199,7 @@ fn synthesize_qr_internal(unit: usize, with_timing: bool) -> GrayImage<'static> 
     };
 
     // Рисуем finder 7×7 (бордер и центр 3×3 чёрные), остальное белое — даёт 1-пикс. white separator.
-    fn draw_finder(set: &mut dyn FnMut(usize,usize,bool), ox: usize, oy: usize) {
+    fn draw_finder(set: &mut dyn FnMut(usize, usize, bool), ox: usize, oy: usize) {
         for dy in 0..7 {
             for dx in 0..7 {
                 let on_border = dx == 0 || dx == 6 || dy == 0 || dy == 6;
@@ -165,17 +214,17 @@ fn synthesize_qr_internal(unit: usize, with_timing: bool) -> GrayImage<'static> 
 
     // top-left
     {
-        let mut s = |x,y,v| set_mod(off + x, off + y, v);
+        let mut s = |x, y, v| set_mod(off + x, off + y, v);
         draw_finder(&mut s, 0, 0);
     }
     // top-right
     {
-        let mut s = |x,y,v| set_mod(off + (n - 7) + x, off + 0 + y, v);
+        let mut s = |x, y, v| set_mod(off + (n - 7) + x, off + 0 + y, v);
         draw_finder(&mut s, 0, 0);
     }
     // bottom-left
     {
-        let mut s = |x,y,v| set_mod(off + 0 + x, off + (n - 7) + y, v);
+        let mut s = |x, y, v| set_mod(off + 0 + x, off + (n - 7) + y, v);
         draw_finder(&mut s, 0, 0);
     }
 
@@ -212,5 +261,9 @@ fn synthesize_qr_internal(unit: usize, with_timing: bool) -> GrayImage<'static> 
     // Возвращаем изображение с 'static' данными (владеем буфером) — только для тестов/демо.
     let boxed = data.into_boxed_slice();
     let leaked: &'static [u8] = Box::leak(boxed);
-    GrayImage { width: w, height: h, data: leaked }
+    GrayImage {
+        width: w,
+        height: h,
+        data: leaked,
+    }
 }

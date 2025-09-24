@@ -25,6 +25,32 @@ impl PointF {
     }
 }
 
+/// Упорядочивает три точки findera: [bottom_left, top_left, top_right].
+/// TL - та, у которой два других соседа образуют примерно прямой угол.
+pub(crate) fn order_finders(p: [PointF; 3]) -> [PointF; 3] {
+    let d01 = p[0].dist2(p[1]);
+    let d12 = p[1].dist2(p[2]);
+    let d02 = p[0].dist2(p[2]);
+
+    let (tl, mut tr, mut bl) = if d01 > d12 && d01 > d02 {
+        // p2 - вершина угла, так как p0-p1 - самая длинная сторона (гипотенуза)
+        (p[2], p[0], p[1])
+    } else if d12 > d01 && d12 > d02 {
+        // p0 - вершина угла
+        (p[0], p[1], p[2])
+    } else {
+        // p1 - вершина угла
+        (p[1], p[0], p[2])
+    };
+
+    // Убедимся, что TR и BL на правильных местах (используем z-компоненту векторного произведения)
+    // (TR-TL) x (BL-TL). Если результат < 0, то порядок BL, TR правильный для системы координат с Y вниз.
+    if (tr.x - tl.x) * (bl.y - tl.y) - (tr.y - tl.y) * (bl.x - tl.x) < 0.0 {
+        std::mem::swap(&mut tr, &mut bl);
+    }
+    [bl, tl, tr]
+}
+
 /// Найти до 3-х центров finder patterns (бычьи глаза) через соотношение 1:1:3:1:1
 /// по множеству горизонтальных и вертикальных сканов. Возвращает центры в пикселях.
 pub fn find_finder_patterns(img: &GrayImage<'_>, opts: &QrOptions) -> Vec<PointF> {

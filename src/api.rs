@@ -204,7 +204,8 @@ impl Pipeline {
 
         // Белый список уровней EC (если непустой).
         if !self.opts.qr_allowed_ec_levels.is_empty()
-            && !self.opts
+            && !self
+                .opts
                 .qr_allowed_ec_levels
                 .iter()
                 .any(|&v| v == ec_level)
@@ -299,34 +300,19 @@ impl Pipeline {
 }
 
 /// Снять маску `mask_id` (0..7) — вернёт новую матрицу 21×21 с XOR маской.
+/// ВАЖНО: маска применяется ТОЛЬКО к data-модулям, а не к function patterns.
 fn unmask_matrix_v1(matrix: &[Vec<bool>], mask_id: u8) -> Vec<Vec<bool>> {
     let n = 21usize;
-    let mut out = vec![vec![false; n]; n];
+    let mut out = matrix.to_vec(); // Start with a copy
     for y in 0..n {
         for x in 0..n {
-            let m = mask_predicate(mask_id, x, y);
-            out[y][x] = matrix[y][x] ^ m;
+            if !qr::data::is_function_v1(x, y) {
+                let m = qr::data::mask_predicate(mask_id, x, y);
+                out[y][x] ^= m;
+            }
         }
     }
     out
-}
-
-/// Предикаты восьми масок из ISO/IEC 18004 (0..7).
-#[inline]
-fn mask_predicate(mask_id: u8, x: usize, y: usize) -> bool {
-    let x = x as i32;
-    let y = y as i32;
-    match mask_id & 7 {
-        0 => ((y + x) % 2) == 0,
-        1 => (y % 2) == 0,
-        2 => (x % 3) == 0,
-        3 => ((y + x) % 3) == 0,
-        4 => (((y / 2) + (x / 3)) % 2) == 0,
-        5 => (((y * x) % 2) + ((y * x) % 3)) == 0,
-        6 => ((((y * x) % 2) + ((y * x) % 3)) % 2) == 0,
-        7 => ((((y + x) % 2) + ((y * x) % 3)) % 2) == 0,
-        _ => false,
-    }
 }
 
 /// Дедупликация по (Symbology, text).

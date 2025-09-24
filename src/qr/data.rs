@@ -105,6 +105,25 @@ pub fn extract_data_bits_v1(grid: &[bool]) -> Vec<bool> {
     bits
 }
 
+/// Предикаты восьми масок из ISO/IEC 18004 (0..7).
+#[inline]
+pub(crate) fn mask_predicate(mask_id: u8, x: usize, y: usize) -> bool {
+    let x = x as i32;
+    let y = y as i32;
+    match mask_id & 7 {
+        0 => ((y + x) % 2) == 0,
+        1 => (y % 2) == 0,
+        2 => (x % 3) == 0,
+        3 => ((y + x) % 3) == 0,
+        4 => (((y / 2) + (x / 3)) % 2) == 0,
+        5 => (((y * x) % 2) + ((y * x) % 3)) == 0,
+        6 => ((((y * x) % 2) + ((y * x) % 3)) % 2) == 0,
+        7 => ((((y + x) % 2) + ((y * x) % 3)) % 2) == 0,
+        _ => false,
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

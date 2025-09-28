@@ -1,46 +1,50 @@
-#![forbid(unsafe_code)]
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
+//! Корневой модуль ультрасканера.
 
-// Публичные модули
-pub mod api;      // высокий уровень: пайплайн, трейт Decoder
-pub mod core;     // общие типы/утилиты (GrayImage и др.)
-pub mod prelude;  // удобные re-export'ы
+#![deny(rust_2018_idioms)]
 
-pub mod one_d;    // 1D декодеры (ean13, code128)
-pub mod qr;       // утилиты QR (format и пр.)
-pub mod binarize; // быстрая бинаризация для 1D
+pub mod core;        // тут лежат types и др.
+pub mod binarize;    // нужен для qr::finder
+pub mod one_d;       // (если есть в проекте; не мешает)
+pub mod qr;
 
-// Реэкспорт базового типа изображения в корень
-pub use crate::core::types::GrayImage;
+pub mod api;         // публичный (для tests)
+pub mod compat;
+pub mod prelude;
 
-// Слой совместимости со старым API (decode_any и пр.)
-mod compat;
-pub use compat::*;
+// Удобные реэкспорты наружу
+pub use api::Pipeline;
+pub use prelude::{
+    GrayImage, LumaImage, DecodedSymbol, DecodedExtras, Symbology, Orientation, Quad,
+};
 
-// === ВАЖНО: реэкспорты для бинарников scan_* ===
-// Раньше они писали `use ultracode::{decode_any, DecodeOptions, GrayImage};` и т.п.
-// Чтобы ничего в них не менять — реэкспортируем здесь.
-pub use crate::one_d::DecodeOptions;
-pub use crate::one_d::{Barcode, BarcodeFormat};
-
-// Нужен также синтезатор для демо Code128:
-pub use crate::one_d::code128::synthesize_row_code128;
-
-// Быстрый «сахар»: функции, принимающие Pipeline и LumaImage.
-// (Сейчас Pipeline пустой — добавляй декодеры внутри Pipeline::decode_all)
-use crate::api::Pipeline;
-use crate::core::types::{DecodedSymbol, LumaImage};
-
-/// Универсальный one-shot: прогоняет изображение через зарегистрированные декодеры.
-/// По умолчанию пайплайн пустой (ты добавляешь декодеры сам через Pipeline::add).
-#[inline]
-pub fn decode_all(img: &LumaImage, pipeline: &Pipeline) -> Vec<DecodedSymbol> {
+// Обёртки, принимающие LumaImage и внутри конвертирующие в GrayImage.
+// Они полезны, если кто-то вызывает через корень крейта.
+pub fn decode_all(img: &LumaImage, pipeline: &api::Pipeline) -> Vec<DecodedSymbol> {
     pipeline.decode_all(img)
 }
 
-/// Упроститель: вернуть первый найденный символ (если важна скорость TTF).
-#[inline]
-pub fn decode_first(img: &LumaImage, pipeline: &Pipeline) -> Option<DecodedSymbol> {
+pub fn decode_first(img: &LumaImage, pipeline: &api::Pipeline) -> Option<DecodedSymbol> {
     pipeline.decode_first(img)
+}
+
+// Переэкспорт опций 1D-декодера и генератора синтетики Code128:
+pub use crate::one_d::DecodeOptions;
+pub use crate::one_d::code128::synthesize_row_code128;
+
+// Старые bin'ы зовут ultracode::decode_any(GrayImage, DecodeOptions).
+// Тонкий шлюз к текущему пайплайну.
+pub fn decode_any(
+    img: crate::core::types::GrayImage<'_>,
+    _opts: DecodeOptions,
+) -> Vec<crate::core::types::DecodedSymbol> {
+    // Переливаем GrayImage (заимствованный) в LumaImage (владеющий),
+    // потому что публичный decode_all сейчас принимает &LumaImage.
+    let owned = crate::core::types::LumaImage {
+        width: img.width,
+        height: img.height,
+        data: img.data.to_vec(),
+    };
+
+    let pipeline = crate::api::Pipeline::default();
+    crate::decode_all(&owned, &pipeline)
 }

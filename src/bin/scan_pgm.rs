@@ -1,162 +1,118 @@
-use std::{
-    env, fs,
-    io::{self, Read},
-};
+use std::env;
+use std::fs;
+use std::io;
+
 use ultracode::{decode_any, DecodeOptions, GrayImage};
 
-fn main() {
-    let mut path: Option<String> = None;
-    let mut scan_rows: Option<usize> = None;
-
-    let mut args = env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--rows" => {
-                if let Some(v) = args.next() {
-                    scan_rows = Some(v.parse().unwrap_or(15));
-                }
-            }
-            "--help" | "-h" => {
-                print_help();
-                return;
-            }
-            other => {
-                if path.is_none() {
-                    path = Some(other.to_string());
-                } else {
-                    eprintln!("Лишний аргумент: {other}");
-                    print_help();
-                    std::process::exit(2);
-                }
-            }
-        }
-    }
-
-    let path = match path {
+fn main() -> io::Result<()> {
+    let path = match env::args().nth(1) {
         Some(p) => p,
         None => {
-            print_help();
-            std::process::exit(2);
+            eprintln!("usage: scan_pgm <file.pgm>");
+            return Ok(());
         }
     };
 
-    let (width, height, data) = match read_pgm_p5(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Не удалось прочитать PGM: {e}");
-            std::process::exit(1);
-        }
-    };
+    let bytes = fs::read(&path)?;
+    let (width, height, data) = parse_pgm_p5(&bytes).unwrap_or_else(|e| {
+        eprintln!("PGM parse error: {e}");
+        std::process::exit(2);
+    });
 
-    let mut opts = DecodeOptions::default();
-    if let Some(r) = scan_rows {
-        opts.scan_rows = r;
-    }
+    // GrayImage заимствует срез данных — держим Vec в области видимости.
+    let img_buf = data;
     let img = GrayImage {
         width,
         height,
-        data: &data,
+        data: &img_buf,
     };
-    let results = decode_any(img, opts);
 
-    if results.is_empty() {
-        println!("Ничего не распознано.");
+    let opts = DecodeOptions::default();
+    let decoded = decode_any(img, opts);
+
+    if decoded.is_empty() {
+        println!("(no symbols)");
     } else {
-        for b in results {
-            println!("{:?}: {}  (row={})", b.format, b.text, b.row);
+        for b in decoded {
+            println!(
+                "{:?}: {}  (conf={:.2}, orient={:?})",
+                b.symbology,
+                b.text,
+                b.confidence,
+                b.orientation
+            );
         }
     }
+
+    Ok(())
 }
 
-fn print_help() {
-    eprintln!(
-        r#"Использование:
-  cargo run --bin scan_pgm -- <path.pgm> [--rows <N>]
+/// Простой парсер бинарного PGM (P5, maxval=255, поддержка комментариев).
+fn parse_pgm_p5(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    if bytes.len() < 2 || &bytes[..2] != b"P5" {
+        return Err("not a P5 pgm".into());
+    }
+    let mut i = 2usize;
 
-Требуется PGM P5 (8-бит, maxval=255).
-Примеры:
-  cargo run --bin scan_pgm -- ./test.pgm
-  cargo run --bin scan_pgm -- ./test.pgm --rows 25
-"#
-    );
-}
-
-// Минимальный парсер PGM (P5, 8-бит)
-fn read_pgm_p5(path: &str) -> io::Result<(usize, usize, Vec<u8>)> {
-    let mut file = fs::File::open(path)?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-
-    // читаем ascii-хедер "P5\n<width> <height>\n<maxval>\n"
-    let mut i = 0usize;
-
-    fn read_token(buf: &[u8], i: &mut usize) -> Option<String> {
-        while *i < buf.len() {
-            let c = buf[*i];
-            if c == b'#' {
-                while *i < buf.len() && buf[*i] != b'\n' {
-                    *i += 1;
-                }
-            } else if c.is_ascii_whitespace() {
-                *i += 1;
-            } else {
-                break;
+    // пропускаем пробелы/переводы строк/комментарии
+    let skip_ws = |idx: &mut usize| {
+        loop {
+            // пробелы
+            while *idx < bytes.len()
+                && matches!(bytes[*idx], b' ' | b'\n' | b'\r' | b'\t')
+            {
+                *idx += 1;
             }
+            // комментарии
+            if *idx < bytes.len() && bytes[*idx] == b'#' {
+                while *idx < bytes.len() && bytes[*idx] != b'\n' {
+                    *idx += 1;
+                }
+                continue;
+            }
+            break;
         }
-        if *i >= buf.len() {
-            return None;
-        }
-        let start = *i;
-        while *i < buf.len() && !buf[*i].is_ascii_whitespace() {
-            *i += 1;
-        }
-        Some(String::from_utf8_lossy(&buf[start..*i]).to_string())
-    }
+    };
 
-    let magic = read_token(&buf, &mut i)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PGM: нет магической сигнатуры"))?;
-    if magic != "P5" {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PGM: поддерживается только P5 (binary)",
-        ));
-    }
-    let width: usize = read_token(&buf, &mut i)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PGM: нет width"))?
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "PGM: неверный width"))?;
-    let height: usize = read_token(&buf, &mut i)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PGM: нет height"))?
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "PGM: неверный height"))?;
-    let maxval: usize = read_token(&buf, &mut i)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PGM: нет maxval"))?
-        .parse()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "PGM: неверный maxval"))?;
-    if maxval != 255 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PGM: поддерживается только maxval=255",
-        ));
-    }
+    let take_while = |idx: &mut usize, pred: fn(u8) -> bool| {
+        let start = *idx;
+        while *idx < bytes.len() && pred(bytes[*idx]) {
+            *idx += 1;
+        }
+        &bytes[start..*idx]
+    };
 
-    if i >= buf.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "PGM: нет данных изображения",
-        ));
-    }
-    if buf[i] == b'\n' {
+    skip_ws(&mut i);
+    let w_str = take_while(&mut i, |c| c.is_ascii_digit());
+    skip_ws(&mut i);
+    let h_str = take_while(&mut i, |c| c.is_ascii_digit());
+    skip_ws(&mut i);
+    let mv_str = take_while(&mut i, |c| c.is_ascii_digit());
+    // один байт разделителя после maxval
+    if i < bytes.len() && matches!(bytes[i], b'\n' | b'\r' | b' ') {
         i += 1;
     }
-    let expected = width.checked_mul(height)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PGM: переполнение размера"))?;
-    if buf.len() - i < expected {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "PGM: мало байтов данных",
-        ));
+
+    let width = std::str::from_utf8(w_str)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or("bad width")?;
+    let height = std::str::from_utf8(h_str)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or("bad height")?;
+    let maxval = std::str::from_utf8(mv_str)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or("bad maxval")?;
+    if maxval != 255 {
+        return Err("only maxval=255 supported".into());
     }
-    let data = buf[i..i + expected].to_vec();
+
+    let need = width.checked_mul(height).ok_or("size overflow")?;
+    if bytes.len() < i + need {
+        return Err("truncated pixel data".into());
+    }
+    let data = bytes[i..i + need].to_vec();
     Ok((width, height, data))
 }

@@ -1,42 +1,19 @@
-// src/compat.rs
-//! Совместимость со старым API (бинарники scan_*).
-//! Используем новый Pipeline и маппим результат в one_d::Barcode.
-
 use crate::api::Pipeline;
-use crate::one_d::{Barcode, BarcodeFormat, DecodeOptions};
-use crate::prelude::{DecodedSymbol, GrayImage, LumaImage, Symbology};
+use crate::prelude::*;
 
-/// Старый вход из бинарников: GrayImage<'_> + DecodeOptions → Vec<one_d::Barcode>.
-/// Конвертируем GrayImage во «владельческий» LumaImage и запускаем новый пайплайн.
-/// Теперь поддерживаем и QR через добавленный вариант BarcodeFormat::QR.
-pub fn decode_any(img: GrayImage<'_>, _opts: DecodeOptions) -> Vec<Barcode> {
+/// Совместимая обёртка: принимает LumaImage и запускает пайплайн по умолчанию.
+pub fn decode(img: &LumaImage) -> Vec<DecodedSymbol> {
     let pipeline = Pipeline::default();
+    pipeline.decode_all(img)
+}
 
-    let owned: LumaImage = img.into();
+/// То же самое, но возвращает только первый результат.
+pub fn decode_first(img: &LumaImage) -> Option<DecodedSymbol> {
+    let pipeline = Pipeline::default();
+    pipeline.decode_first(img)
+}
 
-    let decoded: Vec<DecodedSymbol> = pipeline.decode_all(&owned);
-
-    let mut out = Vec::with_capacity(decoded.len());
-    for s in decoded {
-        let format = match s.symbology {
-            Symbology::Code128 => BarcodeFormat::Code128,
-            Symbology::Ean13 => BarcodeFormat::EAN13,
-            Symbology::QR => BarcodeFormat::QR,
-        };
-
-        // Попробуем вытащить y-координату строки, если она была положена в extras (для 1D).
-        let row = s
-            .extras
-            .properties
-            .get("row")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
-
-        out.push(Barcode {
-            format,
-            text: s.text,
-            row,
-        });
-    }
-    out
+/// Вариант с уже сконфигурированным пайплайном.
+pub fn decode_with_pipeline(img: &LumaImage, pipeline: &Pipeline) -> Vec<DecodedSymbol> {
+    pipeline.decode_all(img)
 }

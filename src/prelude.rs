@@ -1,8 +1,16 @@
-// src/prelude.rs
-//
-// Удобные реэкспорты, чтобы подключать всё нужное одной строкой.
+//! Часто используемые типы, реэкспортированные для удобства.
 
 pub use crate::core::types::{
-    DecodedExtras, DecodedSymbol, GrayImage, GrayImageExt, LumaImage, LumaImageExt, Orientation,
-    Point, Quad, Symbology,
+    // изображения
+    GrayImage,    // буфер оттенков серого, который ждёт пайплайн
+    LumaImage,    // внешний тип, из которого делаем .as_gray()
+
+    // результаты декодирования
+    DecodedSymbol,
+    DecodedExtras,
+
+    // прочее
+    Symbology,
+    Orientation,
+    Quad,
 };
